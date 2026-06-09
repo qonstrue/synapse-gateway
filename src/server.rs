@@ -1,7 +1,6 @@
-//! axum surface: AppState, tenant context, /v1/models, /v1/chat/completions.
+//! axum surface: a thin HTTP layer that delegates to the in-process `Gateway`.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -9,59 +8,44 @@ use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures::stream::{self, Stream};
-use std::convert::Infallible;
-use chrono::Utc;
 use serde_json::json;
-use tap::Pipe;
-use uuid::Uuid;
 
 use crate::error::GatewayError;
-use crate::ledger::{LedgerHandle, UsageEntry};
-use crate::observability::GenAiSpan;
-use crate::pricing::PricingTable;
-use crate::providers::Catalog;
-use crate::routing::classify::{classify, Lane};
-use crate::routing::executor::{execute_chain, Completion};
+use crate::gateway::{Gateway, GuardedStream, RequestCtx};
 use crate::routing::request::ChatRequest;
-use crate::routing::table::RouteTable;
-use crate::vertex_native::VertexNativeProvider;
+use crate::routing::stream::{stream_item_to_sse_json, Accumulator, StreamItem};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub routes: Arc<RouteTable>,
-    pub catalog: Arc<Catalog>,
-    pub pricing: Arc<PricingTable>,
-    pub ledger: LedgerHandle,
-    pub default_tenant: String,
-    pub vertex_native: Option<Arc<VertexNativeProvider>>,
+    pub gateway: Arc<Gateway>,
 }
 
-pub fn router(state: AppState) -> Router {
+pub fn router(gateway: Arc<Gateway>) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
-        .with_state(state)
+        .with_state(AppState { gateway })
 }
 
-struct TenantCtx {
-    tenant: String,
-    workspace: Option<String>,
-}
-
-fn tenant_ctx(headers: &HeaderMap, default_tenant: &str) -> TenantCtx {
-    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
-    TenantCtx {
-        tenant: header("x-synapse-tenant").unwrap_or_else(|| default_tenant.to_string()),
+fn request_ctx(headers: &HeaderMap) -> RequestCtx {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    RequestCtx {
+        tenant: header("x-synapse-tenant"),
         workspace: header("x-synapse-workspace"),
+        request_id: None,
     }
 }
 
 async fn list_models(State(st): State<AppState>) -> impl IntoResponse {
     let data = st
-        .routes
-        .aliases()
+        .gateway
+        .model_aliases()
         .into_iter()
         .map(|id| json!({ "id": id, "object": "model", "owned_by": "synapse" }))
         .collect::<Vec<_>>();
@@ -73,93 +57,65 @@ async fn chat_completions(
     headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> Result<Response, GatewayError> {
-    let started = Instant::now();
-    let ctx = tenant_ctx(&headers, &st.default_tenant);
-    let lane = classify(&req);
-    let legs = st
-        .routes
-        .legs(&req.model)
-        .ok_or_else(|| GatewayError::UnknownModel(req.model.clone()))?
-        .to_vec();
-    let request_id = Uuid::new_v4().to_string();
-
-    let completion: Completion = match lane {
-        Lane::Standard => execute_chain(&st.catalog, &req.model, &legs, &req).await?,
-        Lane::NativeVertex => {
-            let leg = legs
-                .iter()
-                .find(|l| l.provider == "vertex")
-                .ok_or_else(|| GatewayError::NativeFeatureUnsupported {
-                    feature: "native-vertex".into(),
-                    route: req.model.clone(),
-                })?;
-            st.vertex_native
-                .as_ref()
-                .ok_or_else(|| GatewayError::BadRequest("native vertex lane not configured".into()))?
-                .generate(&leg.model, &req)
-                .await?
-        }
+    let request_id = uuid::Uuid::new_v4().to_string();
+    // Share one id between the ledger row (via the gateway) and the response body.
+    let ctx = RequestCtx {
+        request_id: Some(request_id.clone()),
+        ..request_ctx(&headers)
     };
 
-    // Cost + ledger (fire-and-forget).
-    let cost = st.pricing.cost_usd(&completion.provider, &completion.model, completion.input_tokens, completion.output_tokens);
-    UsageEntry {
-        ts: Utc::now(),
-        tenant: ctx.tenant.clone(),
-        workspace: ctx.workspace.clone(),
-        route: req.model.clone(),
-        provider: completion.provider.clone(),
-        model: completion.model.clone(),
-        lane: match lane { Lane::Standard => "standard".into(), Lane::NativeVertex => "native".into() },
-        input_tokens: completion.input_tokens,
-        output_tokens: completion.output_tokens,
-        cost_usd: cost,
-        request_id: request_id.clone(),
-        status: "ok".into(),
-    }
-    .pipe(|entry| st.ledger.enqueue(entry));
-
-    // Observability metrics.
-    GenAiSpan::from_completion(&completion, lane, &req.model, &ctx.tenant, ctx.workspace.as_deref(), legs.len() as u32, false)
-        .emit_metrics(started.elapsed().as_secs_f64());
-
     if req.stream == Some(true) {
-        return Ok(Sse::new(sse_from_completion(&request_id, &completion)).into_response());
+        let stream = st.gateway.chat_stream(req, &ctx).await?;
+        return Ok(Sse::new(sse_body(stream, request_id)).into_response());
     }
-    Ok(Json(openai_response(&request_id, &completion)).into_response())
+
+    let completion = st.gateway.chat(req, &ctx).await?;
+    Ok(Json(openai_json(&completion, &request_id)).into_response())
 }
 
-fn sse_from_completion(id: &str, c: &Completion) -> impl Stream<Item = Result<Event, Infallible>> {
-    let first = json!({
-        "id": format!("chatcmpl-{id}"), "object": "chat.completion.chunk", "created": 0, "model": c.model,
-        "choices": [{ "index": 0, "delta": { "role": "assistant", "content": c.content }, "finish_reason": null }]
-    });
-    let done = json!({
-        "id": format!("chatcmpl-{id}"), "object": "chat.completion.chunk", "created": 0, "model": c.model,
-        "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }]
-    });
-    stream::iter(vec![
-        Ok(Event::default().data(first.to_string())),
-        Ok(Event::default().data(done.to_string())),
-        Ok(Event::default().data("[DONE]")),
-    ])
-}
-
-fn openai_response(id: &str, c: &Completion) -> serde_json::Value {
-    json!({
-        "id": format!("chatcmpl-{id}"),
-        "object": "chat.completion",
-        "created": Utc::now().timestamp(),
-        "model": c.model,
-        "choices": [{
-            "index": 0,
-            "message": { "role": "assistant", "content": c.content },
-            "finish_reason": "stop"
-        }],
-        "usage": {
-            "prompt_tokens": c.input_tokens,
-            "completion_tokens": c.output_tokens,
-            "total_tokens": c.input_tokens + c.output_tokens
+/// Build the OpenAI `chat.completion` JSON from a buffered `Completion`
+/// (content OR tool_calls) via an `Accumulator`.
+fn openai_json(c: &crate::routing::executor::Completion, request_id: &str) -> serde_json::Value {
+    let mut acc = Accumulator::default();
+    if c.tool_calls.is_empty() {
+        acc.push(StreamItem::Delta(c.content.clone()));
+    } else {
+        for (i, tc) in c.tool_calls.iter().enumerate() {
+            acc.push(StreamItem::ToolCallDelta {
+                index: i as u32,
+                id: Some(tc.id.clone()),
+                name: Some(tc.name.clone()),
+                args_fragment: tc.arguments.clone(),
+            });
         }
-    })
+    }
+    acc.push(StreamItem::Done {
+        input_tokens: c.input_tokens,
+        output_tokens: c.output_tokens,
+        finish_reason: c.finish_reason,
+    });
+    acc.to_openai_response(request_id, &c.model)
+}
+
+/// Render a `GuardedStream` as OpenAI SSE (`chat.completion.chunk` … `[DONE]`).
+fn sse_body(
+    stream: GuardedStream,
+    request_id: String,
+) -> impl futures::Stream<Item = Result<Event, std::convert::Infallible>> {
+    use futures::StreamExt;
+    let model = stream.model().to_string();
+    stream
+        .map(move |item| match item {
+            Ok(it) => {
+                let json = stream_item_to_sse_json(&it, &request_id, &model);
+                Ok(Event::default().data(json.to_string()))
+            }
+            Err(e) => {
+                let err = json!({
+                    "error": { "type": "upstream_error", "message": e.to_string(), "code": "upstream_error" }
+                });
+                Ok(Event::default().data(err.to_string()))
+            }
+        })
+        .chain(futures::stream::once(async { Ok(Event::default().data("[DONE]")) }))
 }

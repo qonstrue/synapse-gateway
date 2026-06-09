@@ -91,6 +91,26 @@ impl Catalog {
         }
         Ok(Self { providers })
     }
+
+    /// Test-only catalog of OpenAI-compatible providers from (id, base_url) pairs.
+    #[cfg(test)]
+    pub fn for_test(pairs: Vec<(&'static str, String)>) -> Self {
+        let mut providers: HashMap<String, Arc<Provider>> = HashMap::new();
+        for (id, base_url) in pairs {
+            let p = build_openai_compat_provider(
+                id,
+                OpenAiCompatConfig {
+                    base_url,
+                    api_key: "k".into(),
+                    request_timeout: Duration::from_secs(5),
+                    endpoint_override: None,
+                },
+            )
+            .unwrap();
+            providers.insert(id.to_string(), Arc::new(p));
+        }
+        Self { providers }
+    }
 }
 
 #[cfg(test)]
@@ -98,7 +118,10 @@ mod catalog_tests {
     use super::*;
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
     fn refs(ids: &[&str]) -> std::collections::HashSet<String> {
         ids.iter().map(|s| s.to_string()).collect()

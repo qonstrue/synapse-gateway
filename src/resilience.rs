@@ -142,7 +142,11 @@ where
 
     breaker.record(&result);
 
-    let outcome = if result.is_ok() { "success" } else { "exhausted" };
+    let outcome = if result.is_ok() {
+        "success"
+    } else {
+        "exhausted"
+    };
     record_call_metrics(label, outcome, start.elapsed());
 
     result.map_err(ResilienceError::Exhausted)
@@ -293,7 +297,11 @@ mod tests {
             .respond_with(ResponseTemplate::new(503))
             .mount(&server)
             .await;
-        let resp = reqwest::Client::new().get(server.uri()).send().await.unwrap();
+        let resp = reqwest::Client::new()
+            .get(server.uri())
+            .send()
+            .await
+            .unwrap();
         let err = resp.error_for_status().unwrap_err();
         assert!(is_retryable_reqwest(&err));
     }
@@ -340,7 +348,10 @@ mod tests {
             let err: Result<(), reqwest::Error> = Err(make_fake_reqwest_error());
             b.record(&err);
         }
-        assert!(matches!(b.guard(), Err(ResilienceError::CircuitOpen { .. })));
+        assert!(matches!(
+            b.guard(),
+            Err(ResilienceError::CircuitOpen { .. })
+        ));
     }
 
     fn make_fake_reqwest_error() -> reqwest::Error {
@@ -400,7 +411,10 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(ResilienceError::Exhausted(MyErr(false)))));
+        assert!(matches!(
+            result,
+            Err(ResilienceError::Exhausted(MyErr(false)))
+        ));
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

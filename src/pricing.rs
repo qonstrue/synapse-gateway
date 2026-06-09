@@ -1,7 +1,7 @@
 //! Static pricing table + cost calculation.
 
-use std::collections::HashMap;
 use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct ModelPrice {
@@ -24,7 +24,13 @@ impl PricingTable {
 
     /// Cost in USD for a completed call. Unknown `provider:model` → 0.0
     /// (self-hosted / unpriced models do not error the request).
-    pub fn cost_usd(&self, provider: &str, model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
+    pub fn cost_usd(
+        &self,
+        provider: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> f64 {
         self.prices
             .get(&format!("{provider}:{model}"))
             .map(|p| {

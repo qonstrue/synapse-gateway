@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -16,6 +17,16 @@ fn chat_body(model: &str) -> ChatRequest {
     .unwrap()
 }
 
+/// Standard OpenAI-style SSE body genai can parse: one content delta, then a
+/// finish chunk carrying usage, then `[DONE]`.
+fn sse_ok(content: &str) -> String {
+    format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\n\
+         data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":3,\"completion_tokens\":5,\"total_tokens\":8}}}}\n\n\
+         data: [DONE]\n\n"
+    )
+}
+
 fn ok_response(content: &str) -> serde_json::Value {
     serde_json::json!({
         "id": "x", "object": "chat.completion", "created": 0, "model": "m",
@@ -29,7 +40,12 @@ async fn catalog_for(base: &str) -> Catalog {
         ("DASHSCOPE_API_KEY".to_string(), "sk-test".to_string()),
         ("DASHSCOPE_BASE_URL".to_string(), format!("{base}/v1")),
     ]);
-    Catalog::build(&env, &HashSet::from(["qwen".to_string()]), Duration::from_secs(5)).unwrap()
+    Catalog::build(
+        &env,
+        &HashSet::from(["qwen".to_string()]),
+        Duration::from_secs(5),
+    )
+    .unwrap()
 }
 
 #[tokio::test]
@@ -42,8 +58,13 @@ async fn primary_success_returns_completion_with_usage() {
         .await;
 
     let catalog = catalog_for(&mock.uri()).await;
-    let legs = vec![ChainLeg { provider: "qwen".into(), model: "qwen-max".into() }];
-    let c = execute_chain(&catalog, "gemini-pro", &legs, &chat_body("gemini-pro")).await.unwrap();
+    let legs = vec![ChainLeg {
+        provider: "qwen".into(),
+        model: "qwen-max".into(),
+    }];
+    let c = execute_chain(&catalog, "gemini-pro", &legs, &chat_body("gemini-pro"))
+        .await
+        .unwrap();
     assert_eq!(c.content, "hello");
     assert_eq!(c.input_tokens, 3);
     assert_eq!(c.output_tokens, 5);
@@ -60,10 +81,17 @@ async fn all_legs_fail_yields_all_legs_failed() {
         .await;
 
     let catalog = catalog_for(&mock.uri()).await;
-    let legs = vec![ChainLeg { provider: "qwen".into(), model: "qwen-max".into() }];
-    let err = execute_chain(&catalog, "gemini-pro", &legs, &chat_body("gemini-pro")).await.unwrap_err();
+    let legs = vec![ChainLeg {
+        provider: "qwen".into(),
+        model: "qwen-max".into(),
+    }];
+    let err = execute_chain(&catalog, "gemini-pro", &legs, &chat_body("gemini-pro"))
+        .await
+        .unwrap_err();
     match err {
-        synapse::error::GatewayError::AllLegsFailed { failures, .. } => assert_eq!(failures.len(), 1),
+        synapse::error::GatewayError::AllLegsFailed { failures, .. } => {
+            assert_eq!(failures.len(), 1)
+        }
         other => panic!("expected AllLegsFailed, got {other:?}"),
     }
 }
@@ -94,7 +122,10 @@ async fn first_leg_5xx_falls_over_to_second_leg() {
 
     let env = std::collections::HashMap::from([
         ("DASHSCOPE_API_KEY".to_string(), "sk-test".to_string()),
-        ("DASHSCOPE_BASE_URL".to_string(), format!("{}/v1", mock1.uri())),
+        (
+            "DASHSCOPE_BASE_URL".to_string(),
+            format!("{}/v1", mock1.uri()),
+        ),
         ("OPENAI_API_KEY".to_string(), "sk-test".to_string()),
         ("OPENAI_BASE_URL".to_string(), format!("{}/v1", mock2.uri())),
     ]);
@@ -106,10 +137,18 @@ async fn first_leg_5xx_falls_over_to_second_leg() {
     .unwrap();
 
     let legs = vec![
-        ChainLeg { provider: "qwen".into(), model: "qwen-max".into() },
-        ChainLeg { provider: "openai".into(), model: "gpt-x".into() },
+        ChainLeg {
+            provider: "qwen".into(),
+            model: "qwen-max".into(),
+        },
+        ChainLeg {
+            provider: "openai".into(),
+            model: "gpt-x".into(),
+        },
     ];
-    let c = execute_chain(&catalog, "gemini-pro", &legs, &chat_body("gemini-pro")).await.unwrap();
+    let c = execute_chain(&catalog, "gemini-pro", &legs, &chat_body("gemini-pro"))
+        .await
+        .unwrap();
     assert_eq!(c.content, "from-leg-2");
     assert_eq!(c.provider, "openai");
 }
@@ -123,7 +162,7 @@ async fn http_unknown_model_returns_404() {
     use synapse::pricing::PricingTable;
     use synapse::providers::Catalog;
     use synapse::routing::table::RouteTable;
-    use synapse::server::{router, AppState};
+    use synapse::server::router;
     use tower::ServiceExt;
 
     let routes = RouteTable::from_toml_str(
@@ -137,24 +176,29 @@ async fn http_unknown_model_returns_404() {
         std::time::Duration::from_secs(5),
     )
     .unwrap();
-    let ledger = LedgerHandle::spawn(Arc::new(InMemoryLedger::default()) as Arc<dyn LedgerStore>, 16);
-    let state = AppState {
-        routes: Arc::new(routes),
-        catalog: Arc::new(catalog),
-        pricing: Arc::new(PricingTable::default()),
-        ledger,
-        default_tenant: "unattributed".into(),
-        vertex_native: None,
-    };
+    let ledger = LedgerHandle::spawn(
+        Arc::new(InMemoryLedger::default()) as Arc<dyn LedgerStore>,
+        16,
+    );
+    let gateway = synapse::gateway::Gateway::builder()
+        .routes(routes)
+        .catalog(catalog)
+        .pricing(PricingTable::default())
+        .ledger(ledger)
+        .default_tenant("unattributed")
+        .build()
+        .unwrap();
 
-    let app = router(state);
+    let app = router(Arc::new(gateway));
     let resp = app
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"model":"nope","messages":[{"role":"user","content":"hi"}]}"#))
+                .body(Body::from(
+                    r#"{"model":"nope","messages":[{"role":"user","content":"hi"}]}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -172,7 +216,7 @@ async fn http_happy_path_returns_completion_and_records_ledger() {
     use synapse::pricing::PricingTable;
     use synapse::providers::Catalog;
     use synapse::routing::table::RouteTable;
-    use synapse::server::{router, AppState};
+    use synapse::server::router;
     use tower::ServiceExt;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -180,7 +224,11 @@ async fn http_happy_path_returns_completion_and_records_ledger() {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(ok_response("hi there")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_ok("hi there")),
+        )
         .mount(&mock)
         .await;
 
@@ -192,7 +240,10 @@ async fn http_happy_path_returns_completion_and_records_ledger() {
     let catalog = Catalog::build(
         &std::collections::HashMap::from([
             ("DASHSCOPE_API_KEY".to_string(), "sk".to_string()),
-            ("DASHSCOPE_BASE_URL".to_string(), format!("{}/v1", mock.uri())),
+            (
+                "DASHSCOPE_BASE_URL".to_string(),
+                format!("{}/v1", mock.uri()),
+            ),
         ]),
         &routes.referenced_providers(),
         std::time::Duration::from_secs(5),
@@ -201,16 +252,16 @@ async fn http_happy_path_returns_completion_and_records_ledger() {
 
     let store = Arc::new(InMemoryLedger::default());
     let ledger = LedgerHandle::spawn(store.clone() as Arc<dyn LedgerStore>, 64);
-    let state = AppState {
-        routes: Arc::new(routes),
-        catalog: Arc::new(catalog),
-        pricing: Arc::new(PricingTable::default()),
-        ledger,
-        default_tenant: "unattributed".into(),
-        vertex_native: None,
-    };
+    let gateway = synapse::gateway::Gateway::builder()
+        .routes(routes)
+        .catalog(catalog)
+        .pricing(PricingTable::default())
+        .ledger(ledger)
+        .default_tenant("unattributed")
+        .build()
+        .unwrap();
 
-    let resp = router(state)
+    let resp = router(Arc::new(gateway))
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -253,7 +304,7 @@ async fn http_native_feature_on_non_vertex_route_returns_400() {
     use synapse::pricing::PricingTable;
     use synapse::providers::Catalog;
     use synapse::routing::table::RouteTable;
-    use synapse::server::{router, AppState};
+    use synapse::server::router;
     use tower::ServiceExt;
 
     let routes = RouteTable::from_toml_str(
@@ -267,18 +318,20 @@ async fn http_native_feature_on_non_vertex_route_returns_400() {
         std::time::Duration::from_secs(5),
     )
     .unwrap();
-    let ledger =
-        LedgerHandle::spawn(Arc::new(InMemoryLedger::default()) as Arc<dyn LedgerStore>, 16);
-    let state = AppState {
-        routes: Arc::new(routes),
-        catalog: Arc::new(catalog),
-        pricing: Arc::new(PricingTable::default()),
-        ledger,
-        default_tenant: "unattributed".into(),
-        vertex_native: None,
-    };
+    let ledger = LedgerHandle::spawn(
+        Arc::new(InMemoryLedger::default()) as Arc<dyn LedgerStore>,
+        16,
+    );
+    let gateway = synapse::gateway::Gateway::builder()
+        .routes(routes)
+        .catalog(catalog)
+        .pricing(PricingTable::default())
+        .ledger(ledger)
+        .default_tenant("unattributed")
+        .build()
+        .unwrap();
 
-    let resp = router(state)
+    let resp = router(Arc::new(gateway))
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -305,36 +358,73 @@ async fn http_streaming_returns_sse_chunks() {
     use synapse::pricing::PricingTable;
     use synapse::providers::Catalog;
     use synapse::routing::table::RouteTable;
-    use synapse::server::{router, AppState};
+    use synapse::server::router;
     use tower::ServiceExt;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let mock = MockServer::start().await;
-    Mock::given(method("POST")).and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(ok_response("streamed")))
-        .mount(&mock).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_ok("streamed")),
+        )
+        .mount(&mock)
+        .await;
 
     let routes = RouteTable::from_toml_str(
         r#"[routes."fast"]
-           legs = [{ provider = "qwen", model = "qwen-max" }]"#).unwrap();
+           legs = [{ provider = "qwen", model = "qwen-max" }]"#,
+    )
+    .unwrap();
     let catalog = Catalog::build(
         &std::collections::HashMap::from([
             ("DASHSCOPE_API_KEY".to_string(), "sk".to_string()),
-            ("DASHSCOPE_BASE_URL".to_string(), format!("{}/v1", mock.uri())),
+            (
+                "DASHSCOPE_BASE_URL".to_string(),
+                format!("{}/v1", mock.uri()),
+            ),
         ]),
-        &routes.referenced_providers(), std::time::Duration::from_secs(5)).unwrap();
-    let state = AppState {
-        routes: Arc::new(routes), catalog: Arc::new(catalog), pricing: Arc::new(PricingTable::default()),
-        ledger: LedgerHandle::spawn(Arc::new(InMemoryLedger::default()) as Arc<dyn LedgerStore>, 16),
-        default_tenant: "unattributed".into(), vertex_native: None,
-    };
-    let resp = router(state).oneshot(Request::builder().method("POST").uri("/v1/chat/completions")
-        .header("content-type", "application/json")
-        .body(Body::from(r#"{"model":"fast","stream":true,"messages":[{"role":"user","content":"hi"}]}"#)).unwrap())
-        .await.unwrap();
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
-    assert!(ct.starts_with("text/event-stream"), "content-type was: {ct}");
+        &routes.referenced_providers(),
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    let gateway = synapse::gateway::Gateway::builder()
+        .routes(routes)
+        .catalog(catalog)
+        .pricing(PricingTable::default())
+        .ledger(LedgerHandle::spawn(
+            Arc::new(InMemoryLedger::default()) as Arc<dyn LedgerStore>,
+            16,
+        ))
+        .default_tenant("unattributed")
+        .build()
+        .unwrap();
+    let resp = router(Arc::new(gateway))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"fast","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "content-type was: {ct}"
+    );
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("chat.completion.chunk"), "body: {text}");

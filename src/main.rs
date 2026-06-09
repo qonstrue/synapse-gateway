@@ -10,7 +10,7 @@ use synapse::pricing::PricingTable;
 use synapse::providers::vertex_auth::VertexAuth;
 use synapse::providers::Catalog;
 use synapse::routing::table::RouteTable;
-use synapse::server::{router, AppState};
+use synapse::server::router;
 use synapse::vertex_native::VertexNativeProvider;
 
 #[tokio::main]
@@ -63,45 +63,100 @@ async fn main() -> Result<()> {
             ))
         });
 
-    // Ledger backend selection.
-    let store: Arc<dyn LedgerStore> = match config.ledger_backend {
-        LedgerBackend::Sqlite => {
-            #[cfg(feature = "ledger-sqlite")]
-            {
-                let dsn = config
-                    .ledger_dsn
-                    .clone()
-                    .unwrap_or_else(|| "sqlite://synapse.db?mode=rwc".into());
-                Arc::new(synapse::ledger::sqlite::SqliteLedger::connect(&dsn).await?)
+    // Build one sink per selected backend, then fan out.
+    let mut sinks: Vec<(&'static str, Arc<dyn LedgerStore>)> = Vec::new();
+    for backend in &config.ledger_backends {
+        let sink: Arc<dyn LedgerStore> = match backend {
+            LedgerBackend::Sqlite => {
+                #[cfg(feature = "ledger-sqlite")]
+                {
+                    let dsn = config
+                        .env
+                        .get("SYNAPSE_LEDGER_SQLITE_DSN")
+                        .or_else(|| config.env.get("SYNAPSE_LEDGER_DSN"))
+                        .cloned()
+                        .unwrap_or_else(|| "sqlite://synapse.db?mode=rwc".into());
+                    Arc::new(synapse::ledger::sqlite::SqliteLedger::connect(&dsn).await?)
+                }
+                #[cfg(not(feature = "ledger-sqlite"))]
+                anyhow::bail!(
+                    "ledger backend 'sqlite' requested but built without the ledger-sqlite feature"
+                );
             }
-            #[cfg(not(feature = "ledger-sqlite"))]
-            anyhow::bail!("ledger backend 'sqlite' requested but the binary was built without the ledger-sqlite feature");
-        }
-        LedgerBackend::Postgres => {
-            #[cfg(feature = "ledger-postgres")]
-            {
-                let dsn = config
-                    .ledger_dsn
-                    .clone()
-                    .context("SYNAPSE_LEDGER_DSN required for postgres backend")?;
-                Arc::new(synapse::ledger::postgres::PostgresLedger::connect(&dsn).await?)
+            LedgerBackend::Postgres => {
+                #[cfg(feature = "ledger-postgres")]
+                {
+                    let dsn = config
+                        .env
+                        .get("SYNAPSE_LEDGER_POSTGRES_DSN")
+                        .or_else(|| config.env.get("SYNAPSE_LEDGER_DSN"))
+                        .filter(|s| !s.trim().is_empty())
+                        .context("SYNAPSE_LEDGER_POSTGRES_DSN (or SYNAPSE_LEDGER_DSN) required for postgres ledger")?;
+                    Arc::new(synapse::ledger::postgres::PostgresLedger::connect(dsn).await?)
+                }
+                #[cfg(not(feature = "ledger-postgres"))]
+                anyhow::bail!("ledger backend 'postgres' requested but built without the ledger-postgres feature");
             }
-            #[cfg(not(feature = "ledger-postgres"))]
-            anyhow::bail!("ledger backend 'postgres' requested but the binary was built without the ledger-postgres feature");
-        }
-    };
+            LedgerBackend::Pubsub => {
+                #[cfg(feature = "ledger-pubsub")]
+                {
+                    let project = config
+                        .env
+                        .get("SYNAPSE_LEDGER_PUBSUB_PROJECT")
+                        .or_else(|| config.env.get("VERTEX_PROJECT"))
+                        .filter(|s| !s.trim().is_empty())
+                        .context("SYNAPSE_LEDGER_PUBSUB_PROJECT or VERTEX_PROJECT required for pubsub ledger")?;
+                    let topic = config
+                        .env
+                        .get("SYNAPSE_LEDGER_PUBSUB_TOPIC")
+                        .filter(|s| !s.trim().is_empty())
+                        .context("SYNAPSE_LEDGER_PUBSUB_TOPIC required for pubsub ledger")?;
+                    Arc::new(synapse::ledger::pubsub::PubsubLedger::connect(project, topic).await?)
+                }
+                #[cfg(not(feature = "ledger-pubsub"))]
+                anyhow::bail!(
+                    "ledger backend 'pubsub' requested but built without the ledger-pubsub feature"
+                );
+            }
+            LedgerBackend::Sns => {
+                #[cfg(feature = "ledger-sns")]
+                {
+                    let arn = config
+                        .env
+                        .get("SYNAPSE_LEDGER_SNS_TOPIC_ARN")
+                        .filter(|s| !s.trim().is_empty())
+                        .context("SYNAPSE_LEDGER_SNS_TOPIC_ARN required for sns ledger")?;
+                    let region = config
+                        .env
+                        .get("SYNAPSE_LEDGER_SNS_REGION")
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.as_str());
+                    Arc::new(synapse::ledger::sns::SnsLedger::connect(arn, region).await?)
+                }
+                #[cfg(not(feature = "ledger-sns"))]
+                anyhow::bail!(
+                    "ledger backend 'sns' requested but built without the ledger-sns feature"
+                );
+            }
+        };
+        sinks.push((backend.label(), sink));
+    }
+    let store: Arc<dyn LedgerStore> = Arc::new(synapse::ledger::FanoutLedger::new(sinks));
     let ledger = LedgerHandle::spawn(store, 10_000);
 
-    let state = AppState {
-        routes: Arc::new(routes),
-        catalog: Arc::new(catalog),
-        pricing: Arc::new(pricing),
-        ledger,
-        default_tenant: config.default_tenant.clone(),
-        vertex_native,
-    };
-
-    let app = router(state);
+    let gateway = synapse::gateway::Gateway::builder()
+        .routes(routes)
+        .catalog(catalog)
+        .pricing(pricing)
+        .ledger(ledger)
+        .vertex_native(vertex_native.map(|a| (*a).clone()))
+        .timeouts(synapse::routing::executor::StreamTimeouts {
+            first_chunk: config.request_timeout,
+            idle: config.stream_idle_timeout,
+        })
+        .default_tenant(config.default_tenant.clone())
+        .build()?;
+    let app = router(Arc::new(gateway));
     tracing::info!(addr = %config.addr, "synapse-gateway listening");
     let listener = tokio::net::TcpListener::bind(&config.addr).await?;
     axum::serve(listener, app).await?;

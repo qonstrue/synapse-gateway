@@ -11,10 +11,15 @@ struct CachedToken {
     expires_at: Instant,
 }
 
+/// Async token fetcher: yields a `(bearer token, ttl)` pair or an error string.
+type TokenFetcher = dyn Fn() -> futures::future::BoxFuture<'static, Result<(String, Duration), String>>
+    + Send
+    + Sync;
+
 /// Token cache with async refresh.
 pub struct VertexAuth {
     cached: Mutex<Option<CachedToken>>,
-    fetcher: Box<dyn Fn() -> futures::future::BoxFuture<'static, Result<(String, Duration), String>> + Send + Sync>,
+    fetcher: Box<TokenFetcher>,
     refresh_margin: Duration,
 }
 
@@ -54,7 +59,10 @@ impl VertexAuth {
                     .with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
                     .build_access_token_credentials()
                     .map_err(|e| e.to_string())?;
-                let token = credentials.access_token().await.map_err(|e| e.to_string())?;
+                let token = credentials
+                    .access_token()
+                    .await
+                    .map_err(|e| e.to_string())?;
                 Ok((token.token, Duration::from_secs(50 * 60)))
             })
         })
@@ -87,9 +95,10 @@ impl VertexAuth {
             move |_model_iden: genai::ModelIden| {
                 let auth = auth.clone();
                 Box::pin(async move {
-                    let token = auth.token().await.map_err(|e| {
-                        genai::resolver::Error::Custom(format!("vertex adc: {e}"))
-                    })?;
+                    let token = auth
+                        .token()
+                        .await
+                        .map_err(|e| genai::resolver::Error::Custom(format!("vertex adc: {e}")))?;
                     Ok(Some(genai::resolver::AuthData::from_single(token)))
                 })
                     as std::pin::Pin<

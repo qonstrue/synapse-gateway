@@ -2,7 +2,12 @@
 name = "synapse-gateway"
 version = "0.1.0"
 edition = "2021"
-description = "LLM router and gateway"
+description = "OpenAI-compatible LLM router and gateway with streaming, tool calling, multi-provider fallback, native Vertex AI, and per-tenant cost accounting"
+license = "AGPL-3.0-only"
+repository = "https://github.com/sustentabilitas/synapse-gateway"
+readme = "README.md"
+keywords = ["llm", "gateway", "openai", "vertex-ai", "proxy"]
+categories = ["web-programming::http-server", "api-bindings"]
 
 [lib]
 name = "synapse"
@@ -11,12 +16,13 @@ path = "src/lib.rs"
 [[bin]]
 name = "synapse-gateway"
 path = "src/main.rs"
+required-features = ["server"]
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["full"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 genai = "=0.6.0-beta.19"
 google-cloud-auth = "1.9"
@@ -25,6 +31,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 toml = "0.8"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "chrono", "macros"], optional = true }
+google-cloud-pubsub = { version = "0.30", optional = true }
+google-cloud-googleapis = { version = "0.16", optional = true }
+aws-sdk-sns = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
 backon = "1.5"
 parking_lot = "0.12"
 once_cell = "1.19"
@@ -37,7 +47,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"], optional = true }
 anyhow = "1"
 thiserror = "1"
 
@@ -47,6 +57,9 @@ http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 
 [features]
-default = ["ledger-sqlite"]
+default = ["server", "ledger-sqlite"]
+server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:metrics-exporter-prometheus"]
 ledger-sqlite = ["dep:sqlx", "sqlx/sqlite"]
 ledger-postgres = ["dep:sqlx", "sqlx/postgres"]
+ledger-pubsub = ["dep:google-cloud-pubsub", "dep:google-cloud-googleapis"]
+ledger-sns = ["dep:aws-sdk-sns", "dep:aws-config"]

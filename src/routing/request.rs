@@ -19,6 +19,10 @@ pub struct ChatRequest {
     pub routing_strategy: Option<String>,
     #[serde(default)]
     pub vertex: Option<VertexExt>,
+    #[serde(default)]
+    pub tools: Option<Vec<Value>>,
+    #[serde(default)]
+    pub tool_choice: Option<Value>,
     #[serde(flatten, default)]
     pub passthrough: Map<String, Value>,
 }
@@ -26,7 +30,14 @@ pub struct ChatRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
     pub role: String,
-    pub content: Value, // string or array of content parts
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub content: Value, // string, array of parts, or null on a tool-call turn
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<Value>>, // assistant turn: [{id,type,function:{name,arguments}}]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>, // role:"tool" result correlation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>, // optional name (tool result or system message)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -79,5 +90,29 @@ mod tests {
             Some("cachedContents/abc")
         );
         assert_eq!(req.passthrough.get("top_k"), Some(&serde_json::json!(40)));
+    }
+
+    #[test]
+    fn parses_tools_and_tool_messages() {
+        let body = serde_json::json!({
+            "model": "gemini-pro",
+            "messages": [
+                {"role": "user", "content": "weather in SF?"},
+                {"role": "assistant", "content": null,
+                 "tool_calls": [{"id": "call_0", "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"city\":\"SF\"}"}}]},
+                {"role": "tool", "tool_call_id": "call_0", "content": "21C"}
+            ],
+            "tools": [{"type": "function", "function": {"name": "get_weather",
+                "description": "Lookup", "parameters": {"type": "object"}}}],
+            "tool_choice": "auto"
+        });
+        let req: ChatRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.tools.as_ref().unwrap().len(), 1);
+        assert_eq!(req.tool_choice, Some(serde_json::json!("auto")));
+        let asst = &req.messages[1];
+        assert!(asst.tool_calls.is_some());
+        let tool = &req.messages[2];
+        assert_eq!(tool.tool_call_id.as_deref(), Some("call_0"));
     }
 }

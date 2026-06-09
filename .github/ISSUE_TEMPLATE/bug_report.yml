@@ -1,0 +1,71 @@
+name: Bug report
+description: Something is not working as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to file a bug report. Please fill in as much detail as possible — the more context you provide, the faster we can reproduce and fix the issue.
+
+        Before submitting, please [search existing issues](https://github.com/sustentabilitas/synapse-gateway/issues) to avoid duplicates.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear and concise description of the bug.
+      placeholder: Describe what went wrong.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to reproduce the behavior.
+      placeholder: |
+        1. Start synapse-gateway with config …
+        2. Send request …
+        3. Observe …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+      placeholder: Describe the expected outcome.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Output of `synapse-gateway --version` or the full git SHA you are running.
+      placeholder: "e.g. synapse-gateway 0.2.1 or ad843cd"
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: Relevant portions of your route table, provider config, or lane configuration. Redact any secrets.
+      render: toml
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output (use `RUST_LOG=debug` for verbose output). Redact any sensitive data.
+      render: shell
+
+  - type: checkboxes
+    id: existing-issues
+    attributes:
+      label: Existing issues
+      options:
+        - label: I have searched the existing issues and this is not a duplicate.
+          required: true

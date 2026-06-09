@@ -96,18 +96,13 @@ mod tests {
             provider: "vertex".into(),
             model: "gemini-3-flash".into(),
             content: "x".into(),
+            tool_calls: Vec::new(),
+            finish_reason: crate::routing::stream::FinishReason::Stop,
             input_tokens: 1,
             output_tokens: 2,
         };
-        let span = GenAiSpan::from_completion(
-            &c,
-            Lane::Standard,
-            "fast",
-            "acme",
-            Some("ws1"),
-            2,
-            false,
-        );
+        let span =
+            GenAiSpan::from_completion(&c, Lane::Standard, "fast", "acme", Some("ws1"), 2, false);
         assert_eq!(span.system, "vertexai");
         assert_eq!(span.response_model, "gemini-3-flash");
         assert_eq!(span.workspace.as_deref(), Some("ws1"));

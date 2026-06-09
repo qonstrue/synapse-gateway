@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest a new feature or improvement.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem-motivation
+    attributes:
+      label: Problem / motivation
+      description: What problem does this feature solve? What is the use-case or motivation?
+      placeholder: Describe the problem you are trying to solve.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: Describe the feature or change you would like to see.
+      placeholder: Describe your proposed solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives-considered
+    attributes:
+      label: Alternatives considered
+      description: Have you considered any alternative approaches? Why were they ruled out?
+      placeholder: Describe any alternatives you have considered.
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context / scope
+      description: Any other context, links, prior art, or scope notes that would help assess this request.
+      placeholder: Add any other context here.

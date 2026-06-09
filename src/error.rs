@@ -1,8 +1,12 @@
 //! Gateway error type → OpenAI-shaped JSON + HTTP status.
 
+#[cfg(feature = "server")]
 use axum::http::StatusCode;
+#[cfg(feature = "server")]
 use axum::response::{IntoResponse, Response};
+#[cfg(feature = "server")]
 use axum::Json;
+#[cfg(feature = "server")]
 use serde_json::json;
 use thiserror::Error;
 
@@ -15,7 +19,10 @@ pub enum GatewayError {
     #[error("invalid request: {0}")]
     BadRequest(String),
     #[error("all legs of route '{route}' failed")]
-    AllLegsFailed { route: String, failures: Vec<LegFailure> },
+    AllLegsFailed {
+        route: String,
+        failures: Vec<LegFailure>,
+    },
     #[error("all providers for route '{0}' are unavailable")]
     AllCircuitsOpen(String),
     #[error("upstream timed out")]
@@ -32,6 +39,7 @@ pub struct LegFailure {
 }
 
 impl GatewayError {
+    #[cfg(feature = "server")]
     pub fn status(&self) -> StatusCode {
         match self {
             GatewayError::UnknownModel(_) => StatusCode::NOT_FOUND,
@@ -46,6 +54,7 @@ impl GatewayError {
         }
     }
 
+    #[cfg(feature = "server")]
     fn code(&self) -> &'static str {
         match self {
             GatewayError::UnknownModel(_) => "model_not_found",
@@ -59,6 +68,7 @@ impl GatewayError {
     }
 }
 
+#[cfg(feature = "server")]
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let mut error = json!({

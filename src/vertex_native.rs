@@ -5,11 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tap::Pipe;
 
 use crate::providers::vertex_auth::VertexAuth;
 use crate::routing::executor::Completion;
 use crate::routing::request::{ChatRequest, VertexExt};
+use crate::routing::stream::{FinishReason, StreamItem};
 
 #[derive(Debug, Clone)]
 pub struct VertexNativeProvider {
@@ -37,7 +37,10 @@ impl VertexNativeProvider {
             }
         });
         Self {
-            http: reqwest::Client::builder().timeout(request_timeout).build().unwrap(),
+            http: reqwest::Client::builder()
+                .timeout(request_timeout)
+                .build()
+                .unwrap(),
             auth,
             project,
             region,
@@ -52,14 +55,26 @@ impl VertexNativeProvider {
         )
     }
 
-    pub async fn generate(&self, model: &str, req: &ChatRequest) -> Result<Completion, crate::error::GatewayError> {
+    /// SUPERSEDED by `stream_generate` + the buffered aggregator. The live native
+    /// path (both stream and non-stream via `collect_committed`) goes through
+    /// `stream_generate`; this unary call is retained only for its endpoint/auth
+    /// tests. Note `parse_response` does NOT extract tool calls — do not re-wire
+    /// the request path back through here without restoring that.
+    pub async fn generate(
+        &self,
+        model: &str,
+        req: &ChatRequest,
+    ) -> Result<Completion, crate::error::GatewayError> {
         let ext = req.vertex.clone().unwrap_or_default();
         let payload = build_payload(req, &ext);
         let token = self
             .auth
             .token()
             .await
-            .map_err(|e| crate::error::GatewayError::Upstream { status: 401, body: format!("vertex auth: {e}") })?;
+            .map_err(|e| crate::error::GatewayError::Upstream {
+                status: 401,
+                body: format!("vertex auth: {e}"),
+            })?;
 
         let resp = self
             .http
@@ -68,59 +83,289 @@ impl VertexNativeProvider {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| crate::error::GatewayError::Upstream { status: 502, body: e.to_string() })?;
+            .map_err(|e| crate::error::GatewayError::Upstream {
+                status: 502,
+                body: e.to_string(),
+            })?;
 
         let status = resp.status();
         let value: Value = resp
             .json()
             .await
-            .map_err(|e| crate::error::GatewayError::Upstream { status: status.as_u16(), body: e.to_string() })?;
+            .map_err(|e| crate::error::GatewayError::Upstream {
+                status: status.as_u16(),
+                body: e.to_string(),
+            })?;
         if !status.is_success() {
             if status.is_client_error() {
-                return Err(crate::error::GatewayError::BadRequest(format!("vertex {}: {}", status.as_u16(), value)));
+                return Err(crate::error::GatewayError::BadRequest(format!(
+                    "vertex {}: {}",
+                    status.as_u16(),
+                    value
+                )));
             }
-            return Err(crate::error::GatewayError::Upstream { status: status.as_u16(), body: value.to_string() });
+            return Err(crate::error::GatewayError::Upstream {
+                status: status.as_u16(),
+                body: value.to_string(),
+            });
         }
         parse_response("vertex", model, &value)
     }
-}
 
-/// Build a Vertex `generateContent` body, threading native features through.
-fn build_payload(req: &ChatRequest, ext: &VertexExt) -> Value {
-    let parts = req
-        .messages
-        .iter()
-        .map(|m| json!({ "text": m.content.as_str().map(str::to_string).unwrap_or_else(|| m.content.to_string()) }))
-        .chain(
-            ext.media_uris
-                .iter()
-                .flatten()
-                .map(|uri| json!({ "fileData": { "fileUri": uri, "mimeType": "video/mp4" } })),
+    fn stream_url(&self, model: &str) -> String {
+        format!(
+            "{}/v1/projects/{}/locations/{}/publishers/google/models/{}:streamGenerateContent?alt=sse",
+            self.endpoint_base, self.project, self.region, model
         )
-        .collect::<Vec<_>>();
+    }
 
-    json!({
-        "contents": [{ "role": "user", "parts": parts }],
-    })
-    .pipe(|mut body| {
-        if let Some(cache) = &ext.cached_content {
-            body["cachedContent"] = json!(cache);
-        }
-        if let Some(schema) = &ext.response_schema {
-            body["generationConfig"] = json!({
-                "responseMimeType": "application/json",
-                "responseSchema": schema,
+    /// Open a Vertex SSE stream and normalize chunks into `StreamItem`s.
+    ///
+    /// The outer `Err` is the connection phase, returned as a `GatewayError` so
+    /// the handler preserves Vertex's status distinction (4xx -> 400 BadRequest,
+    /// 5xx/transport -> 502 Upstream) — the same mapping the non-stream
+    /// `generate` used. Per-item (mid-stream) errors remain `LegError`.
+    pub async fn stream_generate(
+        &self,
+        model: &str,
+        req: &ChatRequest,
+    ) -> Result<
+        impl futures::Stream<Item = Result<StreamItem, crate::routing::executor::LegError>>,
+        crate::error::GatewayError,
+    > {
+        use crate::error::GatewayError;
+        use crate::routing::executor::LegError;
+        use crate::routing::stream::FinishReason;
+        use futures::StreamExt;
+
+        let ext = req.vertex.clone().unwrap_or_default();
+        let payload = build_payload(req, &ext);
+        let token = self
+            .auth
+            .token()
+            .await
+            .map_err(|e| GatewayError::Upstream {
+                status: 401,
+                body: format!("vertex auth: {e}"),
+            })?;
+
+        let resp = self
+            .http
+            .post(self.stream_url(model))
+            .bearer_auth(token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| GatewayError::Upstream {
+                status: 502,
+                body: e.to_string(),
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            if status.is_client_error() {
+                return Err(GatewayError::BadRequest(format!(
+                    "vertex {}: {body}",
+                    status.as_u16()
+                )));
+            }
+            return Err(GatewayError::Upstream {
+                status: status.as_u16(),
+                body,
             });
         }
-        if let Some(t) = req.temperature {
-            body["generationConfig"]["temperature"] = json!(t);
+
+        // State threaded across byte chunks via `unfold`: SSE line buffer,
+        // a running tool index, a saw_tool flag (to override the finish reason),
+        // and a queue of already-parsed items ready to yield.
+        struct St<S> {
+            inner: S,
+            // Raw byte buffer (NOT String): a multi-byte UTF-8 codepoint can be
+            // split across two `bytes_stream()` chunks, so we must not lossily
+            // decode per chunk. We decode only whole `\n\n`-terminated events,
+            // whose boundary is always on an ASCII byte.
+            buf: Vec<u8>,
+            tool_index: u32,
+            saw_tool: bool,
+            pending: std::collections::VecDeque<Result<StreamItem, LegError>>,
         }
-        body
-    })
+        let state = St {
+            inner: Box::pin(resp.bytes_stream()),
+            buf: Vec::new(),
+            tool_index: 0,
+            saw_tool: false,
+            pending: std::collections::VecDeque::new(),
+        };
+
+        let items = futures::stream::unfold(state, |mut st| async move {
+            loop {
+                if let Some(item) = st.pending.pop_front() {
+                    return Some((item, st));
+                }
+                match st.inner.next().await {
+                    None => return None,
+                    Some(Err(e)) => return Some((Err(LegError::MidStream(e.to_string())), st)),
+                    Some(Ok(bytes)) => {
+                        st.buf.extend_from_slice(&bytes);
+                        // Drain complete SSE events (separated by a blank line).
+                        // The partial tail (possibly mid-codepoint) stays in `buf`
+                        // as raw bytes until its terminating `\n\n` arrives.
+                        while let Some(pos) = st.buf.windows(2).position(|w| w == b"\n\n") {
+                            let event_bytes: Vec<u8> = st.buf.drain(..pos + 2).collect();
+                            let event = String::from_utf8_lossy(&event_bytes);
+                            for line in event.lines() {
+                                let data = match line.strip_prefix("data:") {
+                                    Some(d) => d.trim(),
+                                    None => continue,
+                                };
+                                if data == "[DONE]" || data.is_empty() {
+                                    continue;
+                                }
+                                match serde_json::from_str::<serde_json::Value>(data) {
+                                    Ok(json) => {
+                                        for mut item in
+                                            vertex_chunk_to_items(&json, &mut st.tool_index)
+                                        {
+                                            if matches!(item, StreamItem::ToolCallDelta { .. }) {
+                                                st.saw_tool = true;
+                                            }
+                                            if let StreamItem::Done { finish_reason, .. } =
+                                                &mut item
+                                            {
+                                                if st.saw_tool {
+                                                    *finish_reason = FinishReason::ToolCalls;
+                                                }
+                                            }
+                                            st.pending.push_back(Ok(item));
+                                        }
+                                    }
+                                    Err(e) => st.pending.push_back(Err(LegError::MidStream(
+                                        format!("bad sse json: {e}"),
+                                    ))),
+                                }
+                            }
+                        }
+                        // loop back: either yield from `pending` or poll more bytes
+                    }
+                }
+            }
+        });
+
+        Ok(items)
+    }
+}
+
+/// Build a Vertex `generateContent`/`streamGenerateContent` body, threading
+/// native features (cache, media, schema) AND tool calling through.
+fn build_payload(req: &ChatRequest, ext: &VertexExt) -> Value {
+    let media_parts = ext
+        .media_uris
+        .iter()
+        .flatten()
+        .map(|uri| json!({ "fileData": { "fileUri": uri, "mimeType": "video/mp4" } }))
+        .collect::<Vec<_>>();
+
+    // One Vertex `content` per gateway message, mapping roles + tool turns.
+    let mut contents: Vec<Value> = Vec::new();
+    for m in &req.messages {
+        match m.role.as_str() {
+            "assistant" if m.tool_calls.is_some() => {
+                let parts = m
+                    .tool_calls
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|tc| {
+                        let f = tc.get("function")?;
+                        let name = f.get("name")?.as_str()?;
+                        let raw = f.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}");
+                        let args: Value = serde_json::from_str(raw).unwrap_or_else(|_| json!({}));
+                        Some(json!({ "functionCall": { "name": name, "args": args } }))
+                    })
+                    .collect::<Vec<_>>();
+                contents.push(json!({ "role": "model", "parts": parts }));
+            }
+            "tool" => {
+                let name = m.name.clone().unwrap_or_default();
+                let response: Value = m
+                    .content
+                    .as_str()
+                    .map(|s| json!({ "content": s }))
+                    .unwrap_or_else(|| json!({ "content": m.content.to_string() }));
+                contents.push(json!({ "role": "user", "parts": [
+                    { "functionResponse": { "name": name, "response": response } }
+                ]}));
+            }
+            role => {
+                let vrole = if role == "assistant" { "model" } else { "user" };
+                let text = m
+                    .content
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| m.content.to_string());
+                contents.push(json!({ "role": vrole, "parts": [{ "text": text }] }));
+            }
+        }
+    }
+    // Attach media to the last user content (or a fresh one) if present.
+    if !media_parts.is_empty() {
+        if let Some(last) = contents.iter_mut().rev().find(|c| c["role"] == "user") {
+            if let Some(arr) = last["parts"].as_array_mut() {
+                arr.extend(media_parts);
+            }
+        } else {
+            contents.push(json!({ "role": "user", "parts": media_parts }));
+        }
+    }
+
+    let mut body = json!({ "contents": contents });
+
+    if let Some(cache) = &ext.cached_content {
+        body["cachedContent"] = json!(cache);
+    }
+    if let Some(schema) = &ext.response_schema {
+        body["generationConfig"] = json!({
+            "responseMimeType": "application/json",
+            "responseSchema": schema,
+        });
+    }
+    if let Some(t) = req.temperature {
+        body["generationConfig"]["temperature"] = json!(t);
+    }
+    if let Some(tools) = &req.tools {
+        let decls = tools.iter().filter_map(|t| {
+            let f = t.get("function")?;
+            Some(json!({
+                "name": f.get("name")?.as_str()?,
+                "description": f.get("description").and_then(|d| d.as_str()).unwrap_or(""),
+                "parameters": f.get("parameters").cloned().unwrap_or_else(|| json!({"type":"object"})),
+            }))
+        }).collect::<Vec<_>>();
+        if !decls.is_empty() {
+            body["tools"] = json!([{ "functionDeclarations": decls }]);
+        }
+    }
+    if let Some(choice) = &req.tool_choice {
+        let mode = match choice {
+            Value::String(s) if s == "none" => "NONE",
+            Value::String(s) if s == "required" => "ANY",
+            Value::String(_) => "AUTO",
+            Value::Object(_) => "ANY",
+            _ => "AUTO",
+        };
+        body["toolConfig"] = json!({ "functionCallingConfig": { "mode": mode } });
+    }
+
+    body
 }
 
 /// Map a Vertex response into the shared `Completion`, extracting usage.
-fn parse_response(provider: &str, model: &str, v: &Value) -> Result<Completion, crate::error::GatewayError> {
+fn parse_response(
+    provider: &str,
+    model: &str,
+    v: &Value,
+) -> Result<Completion, crate::error::GatewayError> {
     let content = v["candidates"][0]["content"]["parts"]
         .as_array()
         .map(|parts| {
@@ -136,9 +381,63 @@ fn parse_response(provider: &str, model: &str, v: &Value) -> Result<Completion, 
         provider: provider.to_string(),
         model: model.to_string(),
         content,
+        tool_calls: Vec::new(),
+        finish_reason: FinishReason::Stop,
         input_tokens: usage["promptTokenCount"].as_u64().unwrap_or(0),
         output_tokens: usage["candidatesTokenCount"].as_u64().unwrap_or(0),
     })
+}
+
+/// Map a Vertex finishReason string to our FinishReason.
+fn map_vertex_finish(s: &str) -> FinishReason {
+    match s {
+        "MAX_TOKENS" => FinishReason::Length,
+        "STOP" => FinishReason::Stop,
+        _ => FinishReason::Stop,
+    }
+}
+
+/// Convert one Vertex stream chunk into zero or more `StreamItem`s.
+/// `tool_index` is a running counter the caller threads across the whole stream
+/// so synthesized ids (`call_{n}`) and indices stay stable and unique.
+pub fn vertex_chunk_to_items(chunk: &Value, tool_index: &mut u32) -> Vec<StreamItem> {
+    let mut out = Vec::new();
+    if let Some(parts) = chunk["candidates"][0]["content"]["parts"].as_array() {
+        for p in parts {
+            if let Some(text) = p["text"].as_str() {
+                if !text.is_empty() {
+                    out.push(StreamItem::Delta(text.to_string()));
+                }
+            } else if let Some(fc) = p.get("functionCall") {
+                let name = fc["name"].as_str().unwrap_or_default().to_string();
+                let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
+                let i = *tool_index;
+                *tool_index += 1;
+                out.push(StreamItem::ToolCallDelta {
+                    index: i,
+                    id: Some(format!("call_{i}")),
+                    name: Some(name),
+                    args_fragment: args.to_string(),
+                });
+            }
+        }
+    }
+    // Emit the terminal Done only when Vertex signals end-of-turn via
+    // `finishReason`. Gemini includes (cumulative) `usageMetadata` on
+    // intermediate chunks too, so gating on usage presence would emit a
+    // spurious Done per chunk — harmless for the buffered accumulator but it
+    // would inject premature `finish_reason` chunks into the SSE stream.
+    // The tool-call finish override (functionCall ends with finishReason STOP)
+    // is applied by the stream driver via its `saw_tool` flag.
+    if let Some(finish) = chunk["candidates"][0]["finishReason"].as_str() {
+        let usage = &chunk["usageMetadata"];
+        out.push(StreamItem::Done {
+            input_tokens: usage["promptTokenCount"].as_u64().unwrap_or(0),
+            output_tokens: usage["candidatesTokenCount"].as_u64().unwrap_or(0),
+            finish_reason: map_vertex_finish(finish),
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -162,10 +461,18 @@ mod tests {
             response_schema: Some(serde_json::json!({"type": "object"})),
         };
         let body = build_payload(&req_with(ext.clone()), &ext);
-        assert_eq!(body["cachedContent"], serde_json::json!("cachedContents/abc"));
-        assert_eq!(body["generationConfig"]["responseSchema"], serde_json::json!({"type": "object"}));
+        assert_eq!(
+            body["cachedContent"],
+            serde_json::json!("cachedContents/abc")
+        );
+        assert_eq!(
+            body["generationConfig"]["responseSchema"],
+            serde_json::json!({"type": "object"})
+        );
         let parts = body["contents"][0]["parts"].as_array().unwrap();
-        assert!(parts.iter().any(|p| p["fileData"]["fileUri"] == "gs://bucket/v.mp4"));
+        assert!(parts
+            .iter()
+            .any(|p| p["fileData"]["fileUri"] == "gs://bucket/v.mp4"));
     }
 
     #[test]
@@ -178,6 +485,76 @@ mod tests {
         assert_eq!(c.content, "ab");
         assert_eq!(c.input_tokens, 10);
         assert_eq!(c.output_tokens, 4);
+    }
+
+    #[test]
+    fn payload_includes_tools_and_function_messages() {
+        let r: ChatRequest = serde_json::from_value(serde_json::json!({
+            "model": "gemini-pro",
+            "messages": [
+                {"role": "user", "content": "weather?"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_0", "type": "function", "function": {"name": "get_weather", "arguments": "{\"c\":\"SF\"}"}}]},
+                {"role": "tool", "tool_call_id": "call_0", "content": "21C"}
+            ],
+            "tools": [{"type": "function", "function": {"name": "get_weather",
+                "description": "Lookup", "parameters": {"type": "object"}}}],
+            "tool_choice": "auto"
+        })).unwrap();
+        let body = build_payload(&r, &VertexExt::default());
+        assert_eq!(
+            body["tools"][0]["functionDeclarations"][0]["name"],
+            "get_weather"
+        );
+        assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
+        let contents = body["contents"].as_array().unwrap();
+        assert!(contents
+            .iter()
+            .any(|c| c["parts"][0]["functionCall"]["name"] == "get_weather"));
+        assert!(contents
+            .iter()
+            .any(|c| c["parts"][0]["functionResponse"]["name"].is_string()));
+    }
+
+    #[test]
+    fn parses_vertex_chunk_text_and_functioncall() {
+        use crate::routing::stream::{FinishReason, StreamItem};
+        let mut idx = 0u32;
+
+        let text_chunk = serde_json::json!({
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "Hi"}]}}]
+        });
+        let items = vertex_chunk_to_items(&text_chunk, &mut idx);
+        assert_eq!(items, vec![StreamItem::Delta("Hi".into())]);
+
+        let fc_chunk = serde_json::json!({
+            "candidates": [{"content": {"role": "model", "parts": [
+                {"functionCall": {"name": "get_weather", "args": {"c": "SF"}}}]}}]
+        });
+        let items = vertex_chunk_to_items(&fc_chunk, &mut idx);
+        assert_eq!(
+            items,
+            vec![StreamItem::ToolCallDelta {
+                index: 0,
+                id: Some("call_0".into()),
+                name: Some("get_weather".into()),
+                args_fragment: "{\"c\":\"SF\"}".into(),
+            }]
+        );
+
+        let final_chunk = serde_json::json!({
+            "candidates": [{"finishReason": "STOP", "content": {"role": "model", "parts": []}}],
+            "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": 3}
+        });
+        let items = vertex_chunk_to_items(&final_chunk, &mut idx);
+        assert_eq!(
+            items,
+            vec![StreamItem::Done {
+                input_tokens: 7,
+                output_tokens: 3,
+                finish_reason: FinishReason::Stop
+            }]
+        );
     }
 
     #[tokio::test]
@@ -200,13 +577,119 @@ mod tests {
             Box::pin(async { Ok(("test-token".into(), Duration::from_secs(3600))) })
         }));
         let provider = VertexNativeProvider::new(
-            auth, "p".into(), "global".into(), Duration::from_secs(5), Some(mock.uri()),
+            auth,
+            "p".into(),
+            "global".into(),
+            Duration::from_secs(5),
+            Some(mock.uri()),
         );
         let c = provider
-            .generate("gemini-3-pro", &req_with(VertexExt { cached_content: Some("cachedContents/x".into()), ..Default::default() }))
+            .generate(
+                "gemini-3-pro",
+                &req_with(VertexExt {
+                    cached_content: Some("cachedContents/x".into()),
+                    ..Default::default()
+                }),
+            )
             .await
             .unwrap();
         assert_eq!(c.content, "ok");
         assert_eq!(c.input_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn stream_generate_yields_text_and_tool_done() {
+        use crate::routing::stream::{FinishReason, StreamItem};
+        use futures::StreamExt;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let sse = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hi\"}]}}]}\n\n\
+                   data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{\"a\":1}}}]}}]}\n\n\
+                   data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"role\":\"model\",\"parts\":[]}}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":4}}\n\n";
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/p/locations/global/publishers/google/models/gemini-3-pro:streamGenerateContent"))
+            .respond_with(ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse))
+            .mount(&mock)
+            .await;
+
+        let auth = Arc::new(VertexAuth::with_fetcher(|| {
+            Box::pin(async { Ok(("test-token".into(), Duration::from_secs(3600))) })
+        }));
+        let provider = VertexNativeProvider::new(
+            auth,
+            "p".into(),
+            "global".into(),
+            Duration::from_secs(5),
+            Some(mock.uri()),
+        );
+
+        let req: ChatRequest = serde_json::from_value(serde_json::json!({
+            "model":"gemini-3-pro","messages":[{"role":"user","content":"hi"}],"stream":true}))
+        .unwrap();
+        let mut stream = std::pin::pin!(provider
+            .stream_generate("gemini-3-pro", &req)
+            .await
+            .expect("starts"));
+        let mut items = Vec::new();
+        while let Some(it) = stream.next().await {
+            items.push(it.unwrap());
+        }
+
+        assert!(items
+            .iter()
+            .any(|i| matches!(i, StreamItem::Delta(t) if t == "Hi")));
+        assert!(items
+            .iter()
+            .any(|i| matches!(i, StreamItem::ToolCallDelta { name: Some(n), .. } if n == "f")));
+        assert!(matches!(
+            items.last().unwrap(),
+            StreamItem::Done {
+                input_tokens: 5,
+                output_tokens: 4,
+                finish_reason: FinishReason::ToolCalls
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn stream_generate_maps_vertex_4xx_to_bad_request() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/p/locations/global/publishers/google/models/gemini-3-pro:streamGenerateContent"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad responseSchema"))
+            .mount(&mock)
+            .await;
+
+        let auth = Arc::new(VertexAuth::with_fetcher(|| {
+            Box::pin(async { Ok(("test-token".into(), Duration::from_secs(3600))) })
+        }));
+        let provider = VertexNativeProvider::new(
+            auth,
+            "p".into(),
+            "global".into(),
+            Duration::from_secs(5),
+            Some(mock.uri()),
+        );
+        let req: ChatRequest = serde_json::from_value(serde_json::json!({
+            "model":"gemini-3-pro","messages":[{"role":"user","content":"hi"}],"stream":true}))
+        .unwrap();
+
+        let err = provider
+            .stream_generate("gemini-3-pro", &req)
+            .await
+            .err()
+            .expect("4xx should be an error");
+        // A Vertex 4xx must surface as a client error (400), not a flat 502.
+        assert!(
+            matches!(err, crate::error::GatewayError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
     }
 }

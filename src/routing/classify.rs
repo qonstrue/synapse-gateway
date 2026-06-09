@@ -17,8 +17,7 @@ pub fn classify(req: &ChatRequest) -> Lane {
     };
     let triggers_native = v.cached_content.is_some()
         || v.response_schema.is_some()
-        || v
-            .media_uris
+        || v.media_uris
             .as_ref()
             .is_some_and(|uris| uris.iter().any(|u| u.starts_with("gs://")));
     if triggers_native {
@@ -48,7 +47,10 @@ mod tests {
     #[test]
     fn cached_content_is_native() {
         let req = ChatRequest {
-            vertex: Some(VertexExt { cached_content: Some("cachedContents/x".into()), ..Default::default() }),
+            vertex: Some(VertexExt {
+                cached_content: Some("cachedContents/x".into()),
+                ..Default::default()
+            }),
             ..base()
         };
         assert_eq!(classify(&req), Lane::NativeVertex);
@@ -57,7 +59,10 @@ mod tests {
     #[test]
     fn response_schema_is_native() {
         let req = ChatRequest {
-            vertex: Some(VertexExt { response_schema: Some(serde_json::json!({"type": "object"})), ..Default::default() }),
+            vertex: Some(VertexExt {
+                response_schema: Some(serde_json::json!({"type": "object"})),
+                ..Default::default()
+            }),
             ..base()
         };
         assert_eq!(classify(&req), Lane::NativeVertex);
@@ -66,12 +71,18 @@ mod tests {
     #[test]
     fn gs_media_uri_is_native_but_https_is_not() {
         let gs = ChatRequest {
-            vertex: Some(VertexExt { media_uris: Some(vec!["gs://b/v.mp4".into()]), ..Default::default() }),
+            vertex: Some(VertexExt {
+                media_uris: Some(vec!["gs://b/v.mp4".into()]),
+                ..Default::default()
+            }),
             ..base()
         };
         assert_eq!(classify(&gs), Lane::NativeVertex);
         let https = ChatRequest {
-            vertex: Some(VertexExt { media_uris: Some(vec!["https://x/v.mp4".into()]), ..Default::default() }),
+            vertex: Some(VertexExt {
+                media_uris: Some(vec!["https://x/v.mp4".into()]),
+                ..Default::default()
+            }),
             ..base()
         };
         assert_eq!(classify(&https), Lane::Standard);

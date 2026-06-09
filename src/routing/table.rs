@@ -1,7 +1,7 @@
 //! Route table: client-facing model alias → ordered fallback legs.
 
-use std::collections::HashMap;
 use serde::Deserialize;
+use std::collections::HashMap;
 use tap::Pipe;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -77,7 +77,13 @@ mod tests {
         let t = RouteTable::from_toml_str(SAMPLE).unwrap();
         let legs = t.legs("gemini-pro").unwrap();
         assert_eq!(legs.len(), 2);
-        assert_eq!(legs[0], ChainLeg { provider: "vertex".into(), model: "gemini-3-pro".into() });
+        assert_eq!(
+            legs[0],
+            ChainLeg {
+                provider: "vertex".into(),
+                model: "gemini-3-pro".into()
+            }
+        );
         assert_eq!(legs[1].provider, "qwen");
         assert!(t.legs("nope").is_none());
     }
@@ -85,7 +91,10 @@ mod tests {
     #[test]
     fn aliases_are_sorted() {
         let t = RouteTable::from_toml_str(SAMPLE).unwrap();
-        assert_eq!(t.aliases(), vec!["fast".to_string(), "gemini-pro".to_string()]);
+        assert_eq!(
+            t.aliases(),
+            vec!["fast".to_string(), "gemini-pro".to_string()]
+        );
     }
 
     #[test]

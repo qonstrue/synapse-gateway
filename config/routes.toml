@@ -1,0 +1,8 @@
+[routes."gemini-pro"]
+legs = [
+  { provider = "vertex", model = "gemini-3-pro" },
+  { provider = "qwen", model = "qwen-max" },
+]
+
+[routes."fast"]
+legs = [{ provider = "vertex", model = "gemini-3-flash" }]

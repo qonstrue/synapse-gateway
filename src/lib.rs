@@ -1,5 +1,6 @@
 //! synapse — LLM router and gateway.
 pub mod config;
+pub mod embeddings;
 pub mod error;
 pub mod gateway;
 pub mod ledger;

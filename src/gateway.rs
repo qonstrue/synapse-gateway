@@ -285,11 +285,26 @@ impl Gateway {
                 "vertex" => crate::embeddings::vertex::VERTEX_EMBED_BATCH,
                 _ => crate::embeddings::openai::OPENAI_EMBED_BATCH,
             };
+            let started = std::time::Instant::now();
             match self
                 .embed_all_batches(embedder.as_ref(), &leg.model, &inputs, dims, limit)
                 .await
             {
                 Ok(out) => {
+                    metrics::counter!(
+                        "synapse_embeddings_total",
+                        "route" => alias.clone(),
+                        "model" => leg.model.clone(),
+                        "provider" => leg.provider.clone(),
+                    )
+                    .increment(1);
+                    metrics::histogram!(
+                        "synapse_embedding_duration_seconds",
+                        "route" => alias.clone(),
+                        "model" => leg.model.clone(),
+                        "provider" => leg.provider.clone(),
+                    )
+                    .record(started.elapsed().as_secs_f64());
                     self.record_embed_usage(&ctx, &alias, leg, out.input_tokens);
                     return Ok(crate::embeddings::build_response(alias, out));
                 }

@@ -12,7 +12,7 @@
       }
     ]
   },
-  "description": "Traffic, latency, token usage, resilience (retries/circuit breakers) and cost-ledger health for synapse-gateway. All metrics are emitted via metrics-exporter-prometheus on the gateway's :9090 /metrics endpoint and scraped by the synapse-gateway ServiceMonitor.",
+  "description": "Traffic, latency, token usage, resilience (retries/circuit breakers), embeddings, and cost-ledger health for synapse-gateway. All metrics are emitted via metrics-exporter-prometheus on the gateway's :9090 /metrics endpoint and scraped by the synapse-gateway ServiceMonitor.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -216,6 +216,43 @@
         { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(synapse_ledger_dropped_total{job=\"$job\"}[5m]))", "legendFormat": "dropped events", "refId": "A" }
       ],
       "title": "Ledger dropped events (queue full)",
+      "type": "timeseries"
+    },
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 43 }, "id": 60, "title": "Embeddings", "type": "row", "panels": [] },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }, "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 44 },
+      "id": 61,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(synapse_embeddings_total{job=\"$job\"}[5m])) by (route)", "legendFormat": "{{route}}", "refId": "A" }
+      ],
+      "title": "Embedding request rate by route",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }, "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 44 },
+      "id": 62,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(synapse_embeddings_total{job=\"$job\"}[5m])) by (provider)", "legendFormat": "{{provider}}", "refId": "A" }
+      ],
+      "title": "Embedding request rate by provider (fallback usage)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }, "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 44 },
+      "id": 63,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.95, sum(rate(synapse_embedding_duration_seconds_bucket{job=\"$job\"}[5m])) by (le, route))", "legendFormat": "p95 {{route}}", "refId": "A" }
+      ],
+      "title": "Embedding latency p95 by route",
       "type": "timeseries"
     }
   ],

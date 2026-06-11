@@ -16,6 +16,7 @@ It visualises traffic, latency, token usage, resilience (retries / circuit break
 | **Tokens** | input & output token rate by `model`, and total tokens consumed (last 1h). |
 | **Resilience** | per-leg circuit-breaker state (closed / open / half-open), leg call rate by `outcome`, retry attempts, and breaker transitions. |
 | **Cost ledger** | ledger error rate by `backend`, and dropped-event rate (queue full). |
+| **Embeddings** | embedding request rate by `route` and by `provider` (fallback usage), and embedding latency p95 by `route`. |
 
 ## Metrics it depends on
 
@@ -33,6 +34,10 @@ All are emitted by `metrics-exporter-prometheus` on the gateway's metrics endpoi
 | `synapse_resilience_breaker_transitions_total` | counter | `name`, `transition` |
 | `synapse_ledger_errors_total` | counter | `backend` |
 | `synapse_ledger_dropped_total` | counter | — |
+| `synapse_embeddings_total` | counter | `route`, `model`, `provider` |
+| `synapse_embedding_duration_seconds` | histogram | `route`, `model`, `provider` |
+
+Embedding token usage and cost are recorded to the **ledger** (not Prometheus) as `UsageEvent`s with `op = "embedding"` — see [embeddings.md](embeddings.md).
 
 The `$job` dashboard variable (a textbox, default `synapse-gateway`) selects the Prometheus `job` label; every panel filters on `{job="$job"}`.
 

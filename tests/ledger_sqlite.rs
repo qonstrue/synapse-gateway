@@ -19,6 +19,7 @@ async fn records_and_persists_a_usage_row() {
         cost_usd: 0.0123,
         request_id: "req-1".into(),
         status: "ok".into(),
+        op: "chat".into(),
     };
     store.record(&entry).await.unwrap();
     store.record(&entry).await.unwrap();

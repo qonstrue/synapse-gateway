@@ -34,6 +34,8 @@ pub struct UsageEntry {
     pub cost_usd: f64,
     pub request_id: String,
     pub status: String,
+    /// Lane discriminator for the ledger: "chat" or "embedding".
+    pub op: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -145,6 +147,7 @@ mod tests {
             cost_usd: 0.001,
             request_id: "r1".into(),
             status: "ok".into(),
+            op: "chat".into(),
         }
     }
 

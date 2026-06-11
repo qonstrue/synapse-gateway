@@ -107,6 +107,7 @@ impl Gateway {
             cost_usd: cost,
             request_id: request_id.to_string(),
             status: "ok".into(),
+            op: "chat".into(),
         });
         let span_lane = if lane == "native" {
             Lane::NativeVertex
@@ -395,6 +396,7 @@ impl Drop for StreamSideEffects {
             cost_usd: cost,
             request_id: self.request_id.clone(),
             status: self.status.to_string(),
+            op: "chat".into(),
         });
 
         // Metrics via GenAiSpan for parity with the buffered path: build a minimal

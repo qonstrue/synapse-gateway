@@ -28,6 +28,8 @@ pub struct UsageEvent {
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub status: String,
+    /// Lane discriminator: "chat" or "embedding".
+    pub op: String,
 }
 
 impl From<&UsageEntry> for UsageEvent {
@@ -46,6 +48,7 @@ impl From<&UsageEntry> for UsageEvent {
             output_tokens: e.output_tokens,
             cost_usd: e.cost_usd,
             status: e.status.clone(),
+            op: e.op.clone(),
         }
     }
 }
@@ -84,6 +87,7 @@ mod tests {
             cost_usd: 0.001,
             request_id: "req-1".into(),
             status: "ok".into(),
+            op: "chat".into(),
         }
     }
 
@@ -97,9 +101,18 @@ mod tests {
         assert_eq!(v["outputTokens"], 5);
         assert_eq!(v["costUsd"], 0.001);
         assert_eq!(v["lane"], "standard");
+        assert_eq!(v["op"], "chat");
         assert!(v.get("workspace").is_none());
         assert!(v.get("request_id").is_none());
         assert!(v.get("input_tokens").is_none());
+    }
+
+    #[test]
+    fn serializes_embedding_op() {
+        let mut e = entry();
+        e.op = "embedding".into();
+        let v = serde_json::to_value(UsageEvent::from(&e)).unwrap();
+        assert_eq!(v["op"], "embedding");
     }
 
     #[test]

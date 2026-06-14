@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-14
+
+### Added
+
+- **Multimodal message content** — OpenAI-style `message.content` arrays (text, `image_url`, `inline_data`) are mapped to genai and native Vertex parts, enabling PDF/image inputs for embedded callers such as wine2o2.
+- **`Catalog::from_map`** — construct a provider catalog from pre-built providers (tests and embedders).
+- **`response_format` in genai lane** — `json_object` and `json_schema` are forwarded through genai `ChatOptions` for structured output.
+
 ## [0.2.0] - 2026-06-11
 
 ### Added
@@ -29,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Observability** — `gen_ai.*` OpenTelemetry span attributes and a Prometheus pull endpoint on every request.
 - **Embeddable library** — `synapse::gateway::Gateway` (builder + in-process `chat()` / `chat_stream()`); the axum HTTP server and Prometheus exporter are behind a default-on `server` feature, so the engine can be embedded with `default-features = false`. See `examples/embed.rs`.
 
-[Unreleased]: https://github.com/sustentabilitas/synapse-gateway/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/sustentabilitas/synapse-gateway/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/sustentabilitas/synapse-gateway/releases/tag/v0.2.1
 [0.2.0]: https://github.com/sustentabilitas/synapse-gateway/releases/tag/v0.2.0
 [0.1.0]: https://github.com/sustentabilitas/synapse-gateway/releases/tag/v0.1.0

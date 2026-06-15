@@ -128,10 +128,7 @@ mod tests {
             ("VERTEX_PROJECT_ID", "from-id"),
             ("VERTEX_PROJECT", "from-legacy"),
         ]);
-        assert_eq!(
-            vertex_project_from_env(&env).as_deref(),
-            Some("from-id")
-        );
+        assert_eq!(vertex_project_from_env(&env).as_deref(), Some("from-id"));
     }
 
     #[test]
@@ -145,10 +142,7 @@ mod tests {
 
     #[test]
     fn vertex_project_from_env_ignores_blank_values() {
-        let env = env(&[
-            ("VERTEX_PROJECT_ID", "  "),
-            ("VERTEX_PROJECT", "ok"),
-        ]);
+        let env = env(&[("VERTEX_PROJECT_ID", "  "), ("VERTEX_PROJECT", "ok")]);
         assert_eq!(vertex_project_from_env(&env).as_deref(), Some("ok"));
     }
 

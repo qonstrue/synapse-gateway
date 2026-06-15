@@ -646,9 +646,17 @@ mod tests {
         let auth = Arc::new(VertexAuth::with_fetcher(|| {
             Box::pin(async { Ok(("t".into(), Duration::from_secs(3600))) })
         }));
-        let provider =
-            VertexNativeProvider::new(auth, "p".into(), "global".into(), Duration::from_secs(5), None);
-        assert_eq!(provider.endpoint_for("global"), "https://aiplatform.googleapis.com");
+        let provider = VertexNativeProvider::new(
+            auth,
+            "p".into(),
+            "global".into(),
+            Duration::from_secs(5),
+            None,
+        );
+        assert_eq!(
+            provider.endpoint_for("global"),
+            "https://aiplatform.googleapis.com"
+        );
         assert_eq!(
             provider.endpoint_for("us-central1"),
             "https://us-central1-aiplatform.googleapis.com"
@@ -682,7 +690,11 @@ mod tests {
             Some(mock.uri()),
         );
         let c = provider
-            .generate("gemini-x", &req_with(VertexExt::default()), Some("us-central1"))
+            .generate(
+                "gemini-x",
+                &req_with(VertexExt::default()),
+                Some("us-central1"),
+            )
             .await
             .unwrap();
         assert_eq!(c.content, "ok");

@@ -166,7 +166,7 @@ async fn main() -> Result<()> {
                         .get("SYNAPSE_LEDGER_PUBSUB_TOPIC")
                         .filter(|s| !s.trim().is_empty())
                         .context("SYNAPSE_LEDGER_PUBSUB_TOPIC required for pubsub ledger")?;
-                    Arc::new(synapse::ledger::pubsub::PubsubLedger::connect(project, topic).await?)
+                    Arc::new(synapse::ledger::pubsub::PubsubLedger::connect(&project, topic).await?)
                 }
                 #[cfg(not(feature = "ledger-pubsub"))]
                 anyhow::bail!(

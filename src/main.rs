@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tracing_subscriber::{fmt, EnvFilter};
 
-use synapse::config::{Config, LedgerBackend};
+use synapse::config::{vertex_project_from_env, Config, LedgerBackend};
 use synapse::embeddings::openai::OpenAiEmbedder;
 use synapse::embeddings::vertex::VertexEmbedder;
 use synapse::embeddings::EmbeddingProvider;
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     // Fail-fast: build every referenced provider's client + validate creds.
     let catalog = Catalog::build(&env, &routes.referenced_providers(), config.request_timeout)?;
 
-    // Native Vertex lane is available when VERTEX_PROJECT is configured.
+    // Native Vertex lane is available when VERTEX_PROJECT_ID or VERTEX_PROJECT is configured.
     // Region defaults to the global endpoint; override with VERTEX_LOCATION.
     let vertex_location = env
         .get("VERTEX_LOCATION")
@@ -60,18 +60,15 @@ async fn main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .unwrap_or("global")
         .to_string();
-    let vertex_native = env
-        .get("VERTEX_PROJECT")
-        .filter(|s| !s.trim().is_empty())
-        .map(|project| {
-            Arc::new(VertexNativeProvider::new(
-                Arc::new(VertexAuth::from_adc()),
-                project.clone(),
-                vertex_location.clone(),
-                config.request_timeout,
-                None,
-            ))
-        });
+    let vertex_native = vertex_project_from_env(&env).map(|project| {
+        Arc::new(VertexNativeProvider::new(
+            Arc::new(VertexAuth::from_adc()),
+            project,
+            vertex_location.clone(),
+            config.request_timeout,
+            None,
+        ))
+    });
 
     // Parse embedding aliases from the same routes file (different top-level table)
     // and build one embedder per referenced provider, mirroring Catalog::build creds.
@@ -80,15 +77,11 @@ async fn main() -> Result<()> {
     for id in embed_routes.referenced_providers() {
         let embedder: Arc<dyn EmbeddingProvider> = match id.as_str() {
             "vertex" => {
-                let project = env
-                    .get("VERTEX_PROJECT")
-                    .filter(|s| !s.trim().is_empty())
-                    .cloned()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "embedding alias references provider 'vertex' but VERTEX_PROJECT is unset"
-                        )
-                    })?;
+                let project = vertex_project_from_env(&env).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "embedding alias references provider 'vertex' but VERTEX_PROJECT_ID and VERTEX_PROJECT are unset"
+                    )
+                })?;
                 Arc::new(VertexEmbedder::new(
                     Arc::new(VertexAuth::from_adc()),
                     project,
@@ -162,9 +155,12 @@ async fn main() -> Result<()> {
                     let project = config
                         .env
                         .get("SYNAPSE_LEDGER_PUBSUB_PROJECT")
-                        .or_else(|| config.env.get("VERTEX_PROJECT"))
+                        .cloned()
                         .filter(|s| !s.trim().is_empty())
-                        .context("SYNAPSE_LEDGER_PUBSUB_PROJECT or VERTEX_PROJECT required for pubsub ledger")?;
+                        .or_else(|| vertex_project_from_env(&config.env))
+                        .context(
+                            "SYNAPSE_LEDGER_PUBSUB_PROJECT, VERTEX_PROJECT_ID, or VERTEX_PROJECT required for pubsub ledger",
+                        )?;
                     let topic = config
                         .env
                         .get("SYNAPSE_LEDGER_PUBSUB_TOPIC")

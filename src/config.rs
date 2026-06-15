@@ -62,6 +62,19 @@ fn parse_ledger_backends(list: &str) -> anyhow::Result<Vec<LedgerBackend>> {
     Ok(out)
 }
 
+/// Resolve the GCP project id for Vertex from an env map.
+/// `VERTEX_PROJECT_ID` is preferred; `VERTEX_PROJECT` is accepted for compatibility.
+pub fn vertex_project_from_env(env: &HashMap<String, String>) -> Option<String> {
+    ["VERTEX_PROJECT_ID", "VERTEX_PROJECT"]
+        .into_iter()
+        .find_map(|key| {
+            env.get(key)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+}
+
 impl Config {
     pub fn from_env_map(env: &HashMap<String, String>) -> anyhow::Result<Self> {
         let get = |k: &str| env.get(k).cloned().filter(|s| !s.trim().is_empty());
@@ -107,6 +120,36 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn vertex_project_from_env_prefers_project_id() {
+        let env = env(&[
+            ("VERTEX_PROJECT_ID", "from-id"),
+            ("VERTEX_PROJECT", "from-legacy"),
+        ]);
+        assert_eq!(
+            vertex_project_from_env(&env).as_deref(),
+            Some("from-id")
+        );
+    }
+
+    #[test]
+    fn vertex_project_from_env_falls_back_to_vertex_project() {
+        let env = env(&[("VERTEX_PROJECT", "legacy-only")]);
+        assert_eq!(
+            vertex_project_from_env(&env).as_deref(),
+            Some("legacy-only")
+        );
+    }
+
+    #[test]
+    fn vertex_project_from_env_ignores_blank_values() {
+        let env = env(&[
+            ("VERTEX_PROJECT_ID", "  "),
+            ("VERTEX_PROJECT", "ok"),
+        ]);
+        assert_eq!(vertex_project_from_env(&env).as_deref(), Some("ok"));
     }
 
     #[test]

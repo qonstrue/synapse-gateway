@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-16
+
+### Fixed
+
+- **Native Vertex lane dropped every SSE event under CRLF** — Vertex/gemini-3
+  terminates `streamGenerateContent` (`?alt=sse`) events with `\r\n\r\n`, but the
+  stream parser only split on `\n\n`, so no event boundary was ever found: the
+  whole response was buffered and discarded, yielding empty content and 0 tokens
+  on every native-lane call (schema-constrained structuring, `/extract`, the
+  organisations resolver/verifier). The boundary scanner now matches both `\n\n`
+  and `\r\n\r\n`.
+
 ## [0.5.0] - 2026-06-15
 
 ### Added

@@ -1,6 +1,6 @@
 [package]
 name = "synapse-gateway"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "OpenAI-compatible LLM router and gateway with streaming, tool calling, multi-provider fallback, native Vertex AI, and per-tenant cost accounting"
 license = "AGPL-3.0-only"

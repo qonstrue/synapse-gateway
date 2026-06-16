@@ -227,10 +227,12 @@ impl VertexNativeProvider {
                     Some(Ok(bytes)) => {
                         st.buf.extend_from_slice(&bytes);
                         // Drain complete SSE events (separated by a blank line).
-                        // The partial tail (possibly mid-codepoint) stays in `buf`
-                        // as raw bytes until its terminating `\n\n` arrives.
-                        while let Some(pos) = st.buf.windows(2).position(|w| w == b"\n\n") {
-                            let event_bytes: Vec<u8> = st.buf.drain(..pos + 2).collect();
+                        // Vertex/gemini-3 terminates events with CRLF (`\r\n\r\n`),
+                        // not just `\n\n`; match either or every event is dropped
+                        // (empty content + 0 tokens). The partial tail (possibly
+                        // mid-codepoint) stays in `buf` until its terminator arrives.
+                        while let Some((pos, sep_len)) = next_sse_boundary(&st.buf) {
+                            let event_bytes: Vec<u8> = st.buf.drain(..pos + sep_len).collect();
                             let event = String::from_utf8_lossy(&event_bytes);
                             for line in event.lines() {
                                 let data = match line.strip_prefix("data:") {
@@ -271,6 +273,21 @@ impl VertexNativeProvider {
         });
 
         Ok(items)
+    }
+}
+
+/// Find the next SSE event boundary (a blank line) in `buf`, returning its start
+/// offset and separator byte length. Handles both `\n\n` (LF) and `\r\n\r\n`
+/// (CRLF) — Vertex/gemini-3 emits CRLF, and matching only `\n\n` drops every
+/// event (empty content + 0 tokens). Picks the earliest boundary.
+fn next_sse_boundary(buf: &[u8]) -> Option<(usize, usize)> {
+    let lf = buf.windows(2).position(|w| w == b"\n\n").map(|p| (p, 2usize));
+    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| (p, 4usize));
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
     }
 }
 
@@ -795,6 +812,70 @@ mod tests {
                 input_tokens: 5,
                 output_tokens: 4,
                 finish_reason: FinishReason::ToolCalls
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn stream_generate_parses_crlf_terminated_events() {
+        // Vertex / gemini-3 terminates SSE events with CRLF blank lines
+        // (`\r\n\r\n`), not `\n\n`. The boundary scanner must handle both, or
+        // every event is dropped → empty content + 0 tokens (the native-lane
+        // outage). Mirrors a real gemini-3-flash response: answer text in the
+        // first chunk, then an empty-text + thoughtSignature final chunk
+        // carrying finishReason + usage.
+        use crate::routing::stream::{FinishReason, StreamItem};
+        use futures::StreamExt;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let sse = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"{\\\"answer\\\":\\\"hi\\\"}\"}]}}],\"usageMetadata\":{\"trafficType\":\"ON_DEMAND\"}}\r\n\r\n\
+                   data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"\",\"thoughtSignature\":\"abc\"}]}}],\"usageMetadata\":{\"promptTokenCount\":56,\"candidatesTokenCount\":8}}\r\n\r\n";
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/p/locations/global/publishers/google/models/gemini-3-pro:streamGenerateContent"))
+            .respond_with(ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse))
+            .mount(&mock)
+            .await;
+
+        let auth = Arc::new(VertexAuth::with_fetcher(|| {
+            Box::pin(async { Ok(("test-token".into(), Duration::from_secs(3600))) })
+        }));
+        let provider = VertexNativeProvider::new(
+            auth,
+            "p".into(),
+            "global".into(),
+            Duration::from_secs(5),
+            Some(mock.uri()),
+        );
+        let req: ChatRequest = serde_json::from_value(serde_json::json!({
+            "model":"gemini-3-pro","messages":[{"role":"user","content":"hi"}],"stream":true}))
+        .unwrap();
+        let mut stream = std::pin::pin!(provider
+            .stream_generate("gemini-3-pro", &req, None)
+            .await
+            .expect("starts"));
+        let mut items = Vec::new();
+        while let Some(it) = stream.next().await {
+            items.push(it.unwrap());
+        }
+
+        let text: String = items
+            .iter()
+            .filter_map(|i| match i {
+                StreamItem::Delta(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "{\"answer\":\"hi\"}", "answer text must survive CRLF events");
+        assert!(matches!(
+            items.last().unwrap(),
+            StreamItem::Done {
+                input_tokens: 56,
+                output_tokens: 8,
+                finish_reason: FinishReason::Stop
             }
         ));
     }

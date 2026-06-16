@@ -47,23 +47,38 @@ impl VertexAuth {
     }
 
     /// Construct using `google-cloud-auth` ADC for token fetching (production path).
-    /// Refreshes the bearer every 50 minutes (well inside the GCE metadata server's
-    /// 1-hour token lifetime). We do not read `expires_in` from the credential because
-    /// the field is not surfaced uniformly across `google-cloud-auth` versions; a
-    /// fixed margin is safer.
+    ///
+    /// The credential is built **once** and reused: `google-cloud-auth` caches the
+    /// bearer and refreshes it internally, so `access_token()` returns a
+    /// currently-valid token on every call. We therefore delegate freshness to it
+    /// and keep only a short synapse-side TTL.
+    ///
+    /// The previous implementation pinned a fixed 50-minute lifetime on whatever
+    /// token it fetched. The GKE metadata server serves the *same* token until
+    /// minutes before its ~1-hour expiry, so a token fetched late in its life was
+    /// cached for another 50 minutes and went stale — surfacing as Vertex
+    /// `401 ACCESS_TOKEN_EXPIRED` for a ~40-minute window every refresh cycle.
     pub fn from_adc() -> Self {
-        Self::with_fetcher(|| {
-            Box::pin(async {
-                use google_cloud_auth::credentials::Builder;
-                let credentials = Builder::default()
-                    .with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
-                    .build_access_token_credentials()
-                    .map_err(|e| e.to_string())?;
-                let token = credentials
-                    .access_token()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                Ok((token.token, Duration::from_secs(50 * 60)))
+        use google_cloud_auth::credentials::{AccessTokenCredentials, Builder};
+        use std::sync::Arc;
+        use tokio::sync::OnceCell;
+
+        let creds: Arc<OnceCell<AccessTokenCredentials>> = Arc::new(OnceCell::new());
+        Self::with_fetcher(move || {
+            let creds = creds.clone();
+            Box::pin(async move {
+                let creds = creds
+                    .get_or_try_init(|| async {
+                        Builder::default()
+                            .with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
+                            .build_access_token_credentials()
+                            .map_err(|e| e.to_string())
+                    })
+                    .await?;
+                let token = creds.access_token().await.map_err(|e| e.to_string())?;
+                // Short TTL: the library owns refresh; this just throttles how often
+                // we re-call the (cheap, in-memory) cached `access_token()`.
+                Ok((token.token, Duration::from_secs(120)))
             })
         })
     }

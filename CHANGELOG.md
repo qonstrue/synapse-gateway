@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-06-16
+
+### Fixed
+
+- **Native Vertex ADC token expiry (`401 ACCESS_TOKEN_EXPIRED`)** — `VertexAuth::
+  from_adc` pinned a fixed 50-minute lifetime on each fetched bearer, but the GKE
+  metadata server serves the same token until minutes before its ~1-hour expiry,
+  so a token fetched late in its life was cached past expiry → Vertex 401s on the
+  native lane for a ~40-minute window each cycle. The ADC credential is now built
+  once and reused; `google-cloud-auth` refreshes internally and `access_token()`
+  returns a currently-valid token, with only a short synapse-side TTL on top.
+
 ## [0.5.1] - 2026-06-16
 
 ### Fixed

@@ -54,6 +54,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Verify version is not already on crates.io
+        env:
+          CRATE: ${{ needs.resolve.outputs.crate }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://crates.io/api/v1/crates/${CRATE}/${VERSION}")"
+          if [[ "$CODE" == "200" ]]; then
+            echo "::error::${CRATE}@${VERSION} is already published on crates.io — bump the version before tagging"
+            exit 1
+          fi
+          if [[ "$CODE" != "404" ]]; then
+            echo "::error::crates.io lookup for ${CRATE}@${VERSION} returned HTTP ${CODE}"
+            exit 1
+          fi
       - name: Verify tag version matches Cargo.toml
         env:
           CRATE: ${{ needs.resolve.outputs.crate }}

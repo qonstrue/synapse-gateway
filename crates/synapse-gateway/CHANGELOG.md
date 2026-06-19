@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-06-19
+
+### Added
+
+- **Input guardrails** — policy config (TOML), scanner registry with bundle aliases,
+  `GuardEngine` (compile, input extraction, decision, metrics), and `ContentBlocked`
+  with an OpenAI-shaped 400 response.
+
 ## [0.5.2] - 2026-06-16
 
 ### Fixed

@@ -60,7 +60,9 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
+          UA="synapse-release-bot (https://github.com/${{ github.repository }})"
           CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "User-Agent: ${UA}" \
             "https://crates.io/api/v1/crates/${CRATE}/${VERSION}")"
           if [[ "$CODE" == "200" ]]; then
             echo "::error::${CRATE}@${VERSION} is already published on crates.io — bump the version before tagging"

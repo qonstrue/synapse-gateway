@@ -4073,11 +4073,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-proxy"
-<<<<<<< HEAD
-version = "0.2.6"
-=======
 version = "0.2.7"
->>>>>>> 3c6d365 (fix(synapse-proxy): strip stale Content-Length after JSON body transforms)
 dependencies = [
  "anyhow",
  "async-trait",

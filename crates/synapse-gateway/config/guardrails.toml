@@ -19,3 +19,10 @@ scanners = ["prompt_injection", "secrets", "pii", "role_override"]
 [guardrails.canary]
 mode = "observe"
 scanners = ["prompt_injection", "secrets"]
+
+[guardrails.browser_agent]
+scanners = [
+  "prompt_injection",
+  "secrets",
+  { type = "token_limit", max_chars = 128000 },
+]

@@ -7,6 +7,10 @@ legs = [
 [routes."fast"]
 legs = [{ provider = "vertex", model = "gemini-3-flash" }]
 
+[routes."browser-agent"]
+policy = "browser_agent"
+legs = [{ provider = "vertex", model = "gemini-3-flash" }]
+
 [embeddings."default-embed"]
 dimensions = 768
 legs = [

@@ -1,6 +1,9 @@
 # Changelog
 
 
+## 0.2.8
+
+
 ## 0.2.7
 
 - Fix upstream forwarding after JSON body transforms (`inject` / `wrap` on `body`): strip stale client `Content-Length` and `Transfer-Encoding` so reqwest sends the full re-serialized body (fixes truncated JSON at upstream when callers like Python urllib set length for the pre-transform payload).

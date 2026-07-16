@@ -19,6 +19,9 @@ pub struct UsageEvent {
     pub namespace: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    /// End-user attribution within the namespace (`x-synapse-user`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
     pub request_id: String,
     pub timestamp: DateTime<Utc>,
     #[serde(rename = "type")]
@@ -40,6 +43,7 @@ impl From<&UsageEntry> for UsageEvent {
         Self {
             namespace: e.tenant.clone(),
             workspace: e.workspace.clone(),
+            user: e.user.clone(),
             request_id: e.request_id.clone(),
             timestamp: e.ts,
             event_type: "usage",
@@ -82,6 +86,7 @@ mod tests {
             ts: Utc.with_ymd_and_hms(2026, 6, 10, 15, 30, 45).unwrap(),
             tenant: "acme".into(),
             workspace: None,
+            user: None,
             route: "gemini-pro".into(),
             provider: "vertex".into(),
             model: "gemini-3-pro".into(),
@@ -107,8 +112,17 @@ mod tests {
         assert_eq!(v["lane"], "standard");
         assert_eq!(v["op"], "chat");
         assert!(v.get("workspace").is_none());
+        assert!(v.get("user").is_none());
         assert!(v.get("request_id").is_none());
         assert!(v.get("input_tokens").is_none());
+    }
+
+    #[test]
+    fn serializes_user_when_present() {
+        let mut e = entry();
+        e.user = Some("user-42".into());
+        let v = serde_json::to_value(UsageEvent::from(&e)).unwrap();
+        assert_eq!(v["user"], "user-42");
     }
 
     #[test]

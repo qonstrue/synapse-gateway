@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
     ts            TEXT    NOT NULL,
     tenant        TEXT    NOT NULL,
     workspace     TEXT,
+    user_id       TEXT,
     route         TEXT    NOT NULL,
     provider      TEXT    NOT NULL,
     model         TEXT    NOT NULL,

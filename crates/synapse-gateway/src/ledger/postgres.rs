@@ -20,6 +20,7 @@ impl PostgresLedger {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS usage_events (\
              id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ NOT NULL, tenant TEXT NOT NULL, workspace TEXT, \
+             user_id TEXT, \
              route TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, lane TEXT NOT NULL, \
              input_tokens BIGINT NOT NULL, output_tokens BIGINT NOT NULL, cost_usd DOUBLE PRECISION NOT NULL, \
              request_id TEXT NOT NULL, status TEXT NOT NULL)",
@@ -27,6 +28,11 @@ impl PostgresLedger {
         .execute(&pool)
         .await
         .map_err(|e| LedgerError::Backend(e.to_string()))?;
+        // Tables created before the user_id column existed.
+        sqlx::query("ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS user_id TEXT")
+            .execute(&pool)
+            .await
+            .map_err(|e| LedgerError::Backend(e.to_string()))?;
         Ok(Self { pool })
     }
 }
@@ -36,12 +42,13 @@ impl LedgerStore for PostgresLedger {
     async fn record(&self, e: &UsageEntry) -> Result<(), LedgerError> {
         sqlx::query(
             "INSERT INTO usage_events \
-             (ts, tenant, workspace, route, provider, model, lane, input_tokens, output_tokens, cost_usd, request_id, status) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+             (ts, tenant, workspace, user_id, route, provider, model, lane, input_tokens, output_tokens, cost_usd, request_id, status) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
         )
         .bind(e.ts)
         .bind(&e.tenant)
         .bind(&e.workspace)
+        .bind(&e.user)
         .bind(&e.route)
         .bind(&e.provider)
         .bind(&e.model)

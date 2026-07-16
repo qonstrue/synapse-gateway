@@ -202,6 +202,8 @@ Both timeouts apply to the standard lane. The native Vertex lane is currently bo
 | `GET` | `/health` | Returns `200 OK` with `{"status":"ok"}`. |
 | `GET` | `/v1/models` | Lists all model aliases defined in `routes.toml`. |
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions. Supports `stream: true` (SSE). Accepts optional `vertex` extension block. |
+| `POST` | `/v1/embeddings` | OpenAI-compatible embeddings against `[embeddings.*]` aliases. |
+| `POST` | `/{v1beta,v1,google}/models/{model}:{action}` | Gemini-native passthrough for `@google/generative-ai` / `@google/genai` SDK clients pointed at the gateway (`GOOGLE_VERTEX_BASE_URL`). Forwards to Vertex with the gateway's credentials; `generateContent` / `streamGenerateContent` are metered to the ledger from the response `usageMetadata` (lane `passthrough`, route = model id), other actions (e.g. `countTokens`) are pure forwards. Requires the native Vertex lane (`VERTEX_PROJECT_ID`). |
 
 ---
 
@@ -390,14 +392,15 @@ When a request is blocked, synapse-gateway returns `HTTP 400` with:
 
 ## Tenant attribution
 
-Two request headers control cost and observability attribution:
+Three request headers control cost and observability attribution:
 
 | Header | Description |
 |--------|-------------|
 | `x-synapse-tenant` | Tenant identifier. Falls back to `SYNAPSE_DEFAULT_TENANT` (`unattributed`). |
 | `x-synapse-workspace` | Optional sub-grouping within a tenant (e.g. a project or team). |
+| `x-synapse-user` | Optional end-user identifier within a tenant, for per-user usage attribution. |
 
-Both values are recorded on ledger `usage_events` rows and carried as attributes on `gen_ai.*` spans.
+Tenant and workspace are recorded on ledger `usage_events` rows and carried as attributes on `gen_ai.*` spans; the user id is recorded on ledger rows (`user_id` column, `user` field on published events) but kept off metrics/spans to bound label cardinality.
 
 ---
 

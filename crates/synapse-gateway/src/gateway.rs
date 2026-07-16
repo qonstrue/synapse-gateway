@@ -47,6 +47,8 @@ pub struct Gateway {
 pub struct RequestCtx {
     pub tenant: Option<String>,
     pub workspace: Option<String>,
+    /// End-user attribution within the tenant (`x-synapse-user` over HTTP).
+    pub user: Option<String>,
     /// Correlation id for the ledger row. When `None` the gateway generates a
     /// UUID. Embedders (and the HTTP layer) can pass their own so the ledger
     /// row and any client-facing response id share one value.
@@ -116,6 +118,7 @@ impl Gateway {
             ts: Utc::now(),
             tenant: self.tenant_of(ctx).to_string(),
             workspace: ctx.workspace.clone(),
+            user: ctx.user.clone(),
             route: route.to_string(),
             provider: c.provider.clone(),
             model: c.model.clone(),
@@ -208,6 +211,7 @@ impl Gateway {
             req.model.clone(),
             self.tenant_of(ctx).to_string(),
             ctx.workspace.clone(),
+            ctx.user.clone(),
             committed.provider.clone(),
             committed.model.clone(),
             lane_str,
@@ -364,6 +368,7 @@ impl Gateway {
             ts: Utc::now(),
             tenant: self.tenant_of(ctx).to_string(),
             workspace: ctx.workspace.clone(),
+            user: ctx.user.clone(),
             route: alias.to_string(),
             provider: leg.provider.clone(),
             model: leg.model.clone(),
@@ -471,6 +476,7 @@ pub(crate) struct StreamSideEffects {
     route: String,
     tenant: String,
     workspace: Option<String>,
+    user: Option<String>,
     provider: String,
     model: String,
     lane: &'static str, // "standard" | "native"
@@ -491,6 +497,7 @@ impl StreamSideEffects {
         route: String,
         tenant: String,
         workspace: Option<String>,
+        user: Option<String>,
         provider: String,
         model: String,
         lane: &'static str,
@@ -504,6 +511,7 @@ impl StreamSideEffects {
             route,
             tenant,
             workspace,
+            user,
             provider,
             model,
             lane,
@@ -554,6 +562,7 @@ impl Drop for StreamSideEffects {
             ts: Utc::now(),
             tenant: self.tenant.clone(),
             workspace: self.workspace.clone(),
+            user: self.user.clone(),
             route: self.route.clone(),
             provider: self.provider.clone(),
             model: self.model.clone(),
@@ -724,6 +733,7 @@ mod tests {
                 "route".into(),
                 "tenant".into(),
                 None,
+                None,
                 "p".into(),
                 "m".into(),
                 "standard",
@@ -765,6 +775,7 @@ mod tests {
             Arc::new(PricingTable::default()),
             "route".into(),
             "acme".into(),
+            None,
             None,
             "p".into(),
             "m".into(),
@@ -823,6 +834,7 @@ mod tests {
         let ctx = RequestCtx {
             tenant: Some("acme".into()),
             workspace: None,
+            user: Some("user-42".into()),
             request_id: Some("corr-123".into()),
         };
         let c = gw.chat(req, &ctx).await.unwrap();
@@ -832,6 +844,7 @@ mod tests {
         let rows = store.entries();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tenant, "acme");
+        assert_eq!(rows[0].user.as_deref(), Some("user-42"));
         // A caller-supplied request_id propagates to the ledger row.
         assert_eq!(rows[0].request_id, "corr-123");
     }

@@ -4,9 +4,9 @@ use std::sync::Arc;
 use synapse_proxy::admin::admin_router;
 use synapse_proxy::build_router;
 use synapse_proxy::config::Config;
+use synapse_proxy::http_client;
 use synapse_proxy::metrics::{metrics_router, Metrics};
 use synapse_proxy::proxy::AppState;
-use synapse_proxy::http_client;
 use synapse_proxy::ProxyBuilder;
 
 #[tokio::main]

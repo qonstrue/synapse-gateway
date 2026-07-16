@@ -125,6 +125,48 @@ impl VertexNativeProvider {
         parse_response("vertex", model, &value)
     }
 
+    /// Forward a raw Gemini-native `models/{model}:{action}` request to Vertex,
+    /// re-authenticated with the gateway's own credentials. Used by the
+    /// passthrough surface (`server::gemini_passthrough`), which meters usage
+    /// from the response's `usageMetadata`; the body is forwarded verbatim.
+    pub async fn passthrough_request(
+        &self,
+        model: &str,
+        action: &str,
+        alt_sse: bool,
+        body: Value,
+    ) -> Result<reqwest::Response, crate::error::GatewayError> {
+        let region = &self.region;
+        let alt = if alt_sse { "?alt=sse" } else { "" };
+        let url = format!(
+            "{}/v1/projects/{}/locations/{}/publishers/google/models/{}:{}{}",
+            self.endpoint_for(region),
+            self.project,
+            region,
+            model,
+            action,
+            alt
+        );
+        let token = self
+            .auth
+            .token()
+            .await
+            .map_err(|e| crate::error::GatewayError::Upstream {
+                status: 401,
+                body: format!("vertex auth: {e}"),
+            })?;
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| crate::error::GatewayError::Upstream {
+                status: 502,
+                body: e.to_string(),
+            })
+    }
+
     fn stream_url(&self, model: &str, region: &str) -> String {
         format!(
             "{}/v1/projects/{}/locations/{}/publishers/google/models/{}:streamGenerateContent?alt=sse",

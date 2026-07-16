@@ -11,6 +11,10 @@ use crate::routing::executor::Completion;
 use crate::routing::request::{ChatRequest, VertexExt};
 use crate::routing::stream::{FinishReason, StreamItem};
 
+/// Total-response ceiling for streamed passthrough requests, overriding the
+/// shared client timeout (which is sized for buffered calls).
+const PASSTHROUGH_STREAM_TIMEOUT: Duration = Duration::from_secs(3600);
+
 #[derive(Debug, Clone)]
 pub struct VertexNativeProvider {
     http: reqwest::Client,
@@ -155,10 +159,15 @@ impl VertexNativeProvider {
                 status: 401,
                 body: format!("vertex auth: {e}"),
             })?;
-        self.http
-            .post(url)
-            .bearer_auth(token)
-            .json(&body)
+        let mut request = self.http.post(url).bearer_auth(token).json(&body);
+        if alt_sse {
+            // The shared client's request timeout covers the WHOLE response
+            // body. Long agent generations routinely stream past it, which
+            // surfaced client-side as mid-stream read errors — so streamed
+            // passthrough gets its own generous ceiling instead.
+            request = request.timeout(PASSTHROUGH_STREAM_TIMEOUT);
+        }
+        request
             .send()
             .await
             .map_err(|e| crate::error::GatewayError::Upstream {

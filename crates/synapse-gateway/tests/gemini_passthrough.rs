@@ -183,6 +183,42 @@ async fn streaming_generate_content_forwards_sse_and_meters_final_usage() {
 }
 
 #[tokio::test]
+async fn streaming_survives_beyond_the_buffered_client_timeout() {
+    // The harness client timeout is 5s; a stream that takes longer must still
+    // complete (streamed passthrough uses its own generous ceiling).
+    let mock = MockServer::start().await;
+    let sse = "data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"slow\"}]}}],\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":4}}\n\n";
+    Mock::given(method("POST"))
+        .and(path(STREAM_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_delay(Duration::from_secs(6))
+                .set_body_string(sse),
+        )
+        .mount(&mock)
+        .await;
+
+    let (gw, store) = passthrough_gateway(&mock.uri()).await;
+    let app = router(Arc::new(gw));
+
+    let resp = app
+        .oneshot(gemini_request(&format!(
+            "/v1beta/models/{MODEL}:streamGenerateContent?alt=sse"
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("\"slow\""));
+
+    let rows = ledger_rows(&store).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].output_tokens, 4);
+    assert_eq!(rows[0].status, "ok");
+}
+
+#[tokio::test]
 async fn google_api_version_prefix_is_also_routed() {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))

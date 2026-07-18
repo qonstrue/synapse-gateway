@@ -115,7 +115,15 @@ impl GatewayError {
                 format!("context not bound: missing identity key '{key}'"),
                 None,
             ),
-            GatewayError::Internal(message) => McpError::internal_error(message, None),
+            GatewayError::Internal(message) => {
+                // The detailed message (upstream URL, raw transport error
+                // text, ...) is operational detail for us, not for the
+                // sandbox-facing caller — log it here and hand back a
+                // generic message so no host/URL/transport internals leak
+                // across the trust boundary.
+                tracing::warn!(error = %message, "gateway internal error; returning generic error to caller");
+                McpError::internal_error("upstream MCP server unavailable", None)
+            }
         }
     }
 }
@@ -126,9 +134,19 @@ impl GatewayError {
 /// *different* identity is evicted (dropped, which cancels it) — the bound
 /// `ContextStore` overlay is process-wide and single-active, so at most one
 /// identity is ever valid for a given server at a time.
+///
+/// Each entry also remembers the `url` it was built against, so a registry
+/// hot-swap (`McpRegistry::register` replacing an existing name's URL) is
+/// picked up even when the bound identity is unchanged — see
+/// `get_or_build`.
+struct CachedClient {
+    client: Arc<UpstreamClient>,
+    url: String,
+}
+
 #[derive(Default)]
 struct ClientCache {
-    entries: AsyncMutex<HashMap<(String, Identity), Arc<UpstreamClient>>>,
+    entries: AsyncMutex<HashMap<(String, Identity), CachedClient>>,
 }
 
 impl ClientCache {
@@ -141,15 +159,27 @@ impl ClientCache {
         let key = (server.to_string(), identity.clone());
         {
             let guard = self.entries.lock().await;
-            if let Some(client) = guard.get(&key) {
-                return Ok(client.clone());
+            if let Some(entry) = guard.get(&key) {
+                if entry.url == url {
+                    return Ok(entry.client.clone());
+                }
+                // Identity is unchanged but the registry now resolves this
+                // server to a different URL (hot-swap) — fall through and
+                // rebuild against the fresh URL rather than serving the
+                // stale connection.
             }
         }
         let client = Arc::new(build_upstream_client(url, identity).await?);
         let mut guard = self.entries.lock().await;
         // Evict stale identities for this server; keep other servers' entries.
         guard.retain(|(name, id), _| name != server || id == identity);
-        guard.insert(key, client.clone());
+        guard.insert(
+            key,
+            CachedClient {
+                client: client.clone(),
+                url: url.to_string(),
+            },
+        );
         Ok(client)
     }
 }
@@ -549,6 +579,100 @@ mod tests {
             "the stale identity_a entry for 'alpha' must be evicted, not accumulated"
         );
         assert!(guard.contains_key(&("alpha".to_string(), identity_b)));
+    }
+
+    /// Second in-process upstream, distinguishable from `EchoUpstream`:
+    /// always returns a fixed marker regardless of headers, so a test can
+    /// tell whether a call actually landed on it vs. `EchoUpstream`.
+    #[derive(Clone, Default)]
+    struct MarkerUpstream;
+
+    impl ServerHandler for MarkerUpstream {
+        fn get_info(&self) -> SrvInfo {
+            SrvInfo::new(SrvCaps::builder().enable_tools().build())
+        }
+
+        async fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<ListToolsResult, McpError> {
+            Ok(ListToolsResult::with_all_items(vec![Tool::new(
+                "echo",
+                "always returns a fixed marker, ignoring headers",
+                serde_json::Map::new(),
+            )]))
+        }
+
+        async fn call_tool(
+            &self,
+            request: CallToolRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<CallToolResult, McpError> {
+            if request.name != "echo" {
+                return Err(McpError::method_not_found::<CallToolRequestMethod>());
+            }
+            Ok(CallToolResult::success(vec![ContentBlock::text(
+                "upstream-b-marker".to_string(),
+            )]))
+        }
+    }
+
+    async fn spawn_marker_upstream() -> SocketAddr {
+        let service = SrvHttpService::new(
+            || Ok(MarkerUpstream),
+            LocalSessionManager::default().into(),
+            StreamableHttpServerConfig::default(),
+        );
+        let router: Router = Router::new().nest_service("/mcp", service);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("axum::serve exited");
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn registry_url_hot_swap_rebuilds_the_cached_upstream_client() {
+        // Task-1/Finding-1 regression: `ClientCache` used to key purely on
+        // (server, identity), so a registry hot-swap to a new URL under an
+        // unchanged identity kept serving the stale cached client forever.
+        let upstream_a_addr = spawn_echo_upstream().await;
+        let upstream_b_addr = spawn_marker_upstream().await;
+
+        let registry = Arc::new(McpRegistry::new());
+        registry.register("alpha".to_string(), format!("http://{upstream_a_addr}/mcp"), None);
+
+        let context = Arc::new(ContextStore::new(HashMap::new()));
+        context.push(
+            HashMap::from([
+                ("org".to_string(), "acme-corp".to_string()),
+                ("workspace".to_string(), "ws-1".to_string()),
+                ("user".to_string(), "u-42".to_string()),
+            ]),
+            None,
+        );
+
+        let gateway_addr = spawn_gateway(registry.clone(), context).await;
+        let client = connect_sandbox_client(gateway_addr, "alpha", HashMap::new()).await;
+
+        let first = call_echo(&client).await;
+        assert_eq!(first, "acme-corp", "first call must hit upstream A and cache against it");
+
+        // Hot-swap the registry entry to a DIFFERENT in-process server under
+        // the same name; the bound identity does not change.
+        registry.register("alpha".to_string(), format!("http://{upstream_b_addr}/mcp"), None);
+
+        let second = call_echo(&client).await;
+        assert_eq!(
+            second, "upstream-b-marker",
+            "next call under the same identity must rebuild against the hot-swapped url and hit upstream B"
+        );
+
+        client.cancel().await.ok();
     }
 
     #[tokio::test]

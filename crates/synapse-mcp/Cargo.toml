@@ -1,0 +1,28 @@
+[package]
+name = "synapse-mcp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "synapse_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+synapse-proxy = { path = "../synapse-proxy" }
+rmcp = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+# Must match the `http` crate version rmcp uses internally (it inserts
+# `http::request::Parts` into `RequestContext::extensions` by concrete
+# TypeId, so this crate needs the identical type to read it back).
+http = "1"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { workspace = true, features = ["util"] }

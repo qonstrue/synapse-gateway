@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/synapse-gateway", "crates/synapse-proxy"]
+members = ["crates/synapse-gateway", "crates/synapse-proxy", "crates/synapse-mcp"]
 
 [workspace.package]
 edition = "2021"
@@ -22,3 +22,4 @@ anyhow = "1"
 futures = "0.3"
 bytes = "1"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+rmcp = { version = "2.2", features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }

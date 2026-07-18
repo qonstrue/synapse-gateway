@@ -48,3 +48,7 @@
 //! `ResolvedContext` overlay changes, or (b) maintaining a small pool of
 //! per-identity clients keyed by the resolved header values — but it
 //! categorically cannot rely on mutating headers on one long-lived client.
+
+pub mod registry;
+
+pub use registry::{McpRegistry, RegisteredUpstream};

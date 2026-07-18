@@ -4183,7 +4183,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-proxy"
-version = "0.2.11"
+version = "0.2.13"
 dependencies = [
  "anyhow",
  "async-trait",

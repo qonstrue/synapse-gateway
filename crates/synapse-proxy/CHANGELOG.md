@@ -1,6 +1,9 @@
 # Changelog
 
 
+## 0.2.13
+
+
 ## 0.2.11
 
 - Remove the MCP gateway wiring: `synapse-proxy` is now a generic reverse-proxy that depends only on the extracted `synapse-context` leaf. The MCP gateway lives in the separate `synapse-mcp` crate and is mounted by downstream brokers, so `synapse-proxy` no longer pulls `rmcp`.

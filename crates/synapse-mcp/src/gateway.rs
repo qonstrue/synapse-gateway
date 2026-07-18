@@ -52,49 +52,73 @@ use crate::registry::McpRegistry;
 
 type UpstreamClient = rmcp::service::RunningService<RoleClient, ClientInfo>;
 
-/// The three identity values every forwarded call must carry. All three or
-/// none — a partially-bound overlay is treated the same as an empty one.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct Identity {
-    org: String,
-    workspace: String,
-    user: String,
+/// A single "context key → forwarded header" injection rule. The downstream
+/// broker supplies the concrete rules (e.g. `org` → `x-org-id`); this crate
+/// has no built-in notion of what identity looks like.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct IdentityHeaderRule {
+    /// Key looked up in the `ContextStore` overlay (`ResolvedContext::get`).
+    pub context_key: String,
+    /// Forwarded HTTP header name set from that value.
+    pub header: String,
+    /// If `true` and `context_key` is absent from the resolved context, the
+    /// call fails closed instead of forwarding without that header.
+    #[serde(default)]
+    pub required: bool,
 }
 
-impl Identity {
-    /// Fail closed if any of `org`/`workspace`/`user` is absent from the
-    /// resolved context (mirrors `transform/inject.rs`'s per-key contract).
-    fn from_context(ctx: &ResolvedContext) -> Result<Self, GatewayError> {
-        let get = |key: &'static str| {
-            ctx.get(key)
-                .map(str::to_string)
-                .ok_or(GatewayError::Unbound(key))
-        };
-        Ok(Self {
-            org: get("org")?,
-            workspace: get("workspace")?,
-            user: get("user")?,
-        })
+/// Config-driven identity injection for the gateway. An empty `inject` list
+/// is a valid configuration: it means no identity is injected into forwarded
+/// requests at all (the fail-closed guarantee only applies to `required`
+/// rules — there is nothing to fail closed on if there are no rules).
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct McpGatewayConfig {
+    #[serde(default)]
+    pub inject: Vec<IdentityHeaderRule>,
+}
+
+/// The resolved `(header, value)` pairs for one forwarded call, computed by
+/// applying `McpGatewayConfig::inject` against a `ResolvedContext`. Sorted by
+/// header name so the cache-key fingerprint is stable regardless of the
+/// order rules are declared in config. This is both the source of the
+/// forwarded headers and the `ClientCache` key: two calls that resolve to
+/// the same pairs share a client, any difference forces a rebuild — so a
+/// different identity can never reuse another's client.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ResolvedInjection(Vec<(String, String)>);
+
+impl ResolvedInjection {
+    /// Resolve every rule in `config.inject` against `ctx`. Fail closed
+    /// (`GatewayError::Unbound`) if a `required` rule's `context_key` is
+    /// absent; an absent *optional* rule's header is simply omitted from the
+    /// result, and the call still proceeds. Never reads anything from a
+    /// client-supplied header — there is no code path here that touches the
+    /// inbound sandbox request's headers at all, so a client-supplied
+    /// spoofed header cannot leak upstream.
+    fn resolve(config: &McpGatewayConfig, ctx: &ResolvedContext) -> Result<Self, GatewayError> {
+        let mut pairs = Vec::with_capacity(config.inject.len());
+        for rule in &config.inject {
+            match ctx.get(&rule.context_key) {
+                Some(value) => pairs.push((rule.header.clone(), value.to_string())),
+                None if rule.required => {
+                    return Err(GatewayError::Unbound(rule.context_key.clone()))
+                }
+                None => {}
+            }
+        }
+        pairs.sort();
+        Ok(Self(pairs))
     }
 
-    /// Build the exact three forwarded headers from the bound identity.
-    /// Never reads anything from a client-supplied header — there is no
-    /// code path here that touches the inbound sandbox request's headers at
-    /// all, so a client-supplied `x-org-id` etc. cannot leak upstream.
+    /// Build the forwarded headers from the resolved pairs.
     fn header_map(&self) -> Result<HashMap<HeaderName, HeaderValue>, GatewayError> {
-        let mut headers = HashMap::with_capacity(3);
-        headers.insert(
-            HeaderName::from_static("x-org-id"),
-            to_header_value(&self.org)?,
-        );
-        headers.insert(
-            HeaderName::from_static("x-workspace-id"),
-            to_header_value(&self.workspace)?,
-        );
-        headers.insert(
-            HeaderName::from_static("x-user-id"),
-            to_header_value(&self.user)?,
-        );
+        let mut headers = HashMap::with_capacity(self.0.len());
+        for (name, value) in &self.0 {
+            let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
+                GatewayError::Internal(format!("invalid header name '{name}': {e}"))
+            })?;
+            headers.insert(header_name, to_header_value(value)?);
+        }
         Ok(headers)
     }
 }
@@ -109,8 +133,9 @@ fn to_header_value(value: &str) -> Result<HeaderValue, GatewayError> {
 enum GatewayError {
     /// `registry.resolve(name)` returned `None` (unregistered or TTL-expired).
     UnknownServer(String),
-    /// The resolved context is missing one of `org`/`workspace`/`user`.
-    Unbound(&'static str),
+    /// A `required` injection rule's `context_key` is missing from the
+    /// resolved context.
+    Unbound(String),
     /// Anything else (header construction, upstream connect failure, ...).
     Internal(String),
 }
@@ -139,16 +164,17 @@ impl GatewayError {
     }
 }
 
-/// Cache of live upstream rmcp clients. Keyed by `(server name, identity)`
-/// per the Task-1 finding (headers are per-connection, not per-call); on
-/// insert, any other cached client for the same server name under a
-/// *different* identity is evicted (dropped, which cancels it) — the bound
-/// `ContextStore` overlay is process-wide and single-active, so at most one
-/// identity is ever valid for a given server at a time.
+/// Cache of live upstream rmcp clients. Keyed by `(server name, resolved
+/// injection)` per the Task-1 finding (headers are per-connection, not
+/// per-call); on insert, any other cached client for the same server name
+/// under a *different* resolved injection is evicted (dropped, which cancels
+/// it) — the bound `ContextStore` overlay is process-wide and single-active,
+/// so at most one resolved injection is ever valid for a given server at a
+/// time.
 ///
 /// Each entry also remembers the `url` it was built against, so a registry
 /// hot-swap (`McpRegistry::register` replacing an existing name's URL) is
-/// picked up even when the bound identity is unchanged — see
+/// picked up even when the resolved injection is unchanged — see
 /// `get_or_build`.
 struct CachedClient {
     client: Arc<UpstreamClient>,
@@ -157,7 +183,7 @@ struct CachedClient {
 
 #[derive(Default)]
 struct ClientCache {
-    entries: AsyncMutex<HashMap<(String, Identity), CachedClient>>,
+    entries: AsyncMutex<HashMap<(String, ResolvedInjection), CachedClient>>,
 }
 
 impl ClientCache {
@@ -171,9 +197,9 @@ impl ClientCache {
         registry: &McpRegistry,
         server: &str,
         url: &str,
-        identity: &Identity,
+        injection: &ResolvedInjection,
     ) -> Result<Arc<UpstreamClient>, GatewayError> {
-        let key = (server.to_string(), identity.clone());
+        let key = (server.to_string(), injection.clone());
         {
             let mut guard = self.entries.lock().await;
             if let Some(entry) = guard.get(&key) {
@@ -182,16 +208,16 @@ impl ClientCache {
                     sweep_deregistered(&mut guard, registry);
                     return Ok(client);
                 }
-                // Identity is unchanged but the registry now resolves this
-                // server to a different URL (hot-swap) — fall through and
-                // rebuild against the fresh URL rather than serving the
-                // stale connection.
+                // The resolved injection is unchanged but the registry now
+                // resolves this server to a different URL (hot-swap) — fall
+                // through and rebuild against the fresh URL rather than
+                // serving the stale connection.
             }
         }
-        let client = Arc::new(build_upstream_client(url, identity).await?);
+        let client = Arc::new(build_upstream_client(url, injection).await?);
         let mut guard = self.entries.lock().await;
-        // Evict stale identities for this server; keep other servers' entries.
-        guard.retain(|(name, id), _| name != server || id == identity);
+        // Evict stale injections for this server; keep other servers' entries.
+        guard.retain(|(name, inj), _| name != server || inj == injection);
         guard.insert(
             key,
             CachedClient {
@@ -213,7 +239,7 @@ impl ClientCache {
 /// name forever. Dropping the `CachedClient` is sufficient to cancel its
 /// connection — rmcp's client shuts down on drop.
 fn sweep_deregistered(
-    entries: &mut HashMap<(String, Identity), CachedClient>,
+    entries: &mut HashMap<(String, ResolvedInjection), CachedClient>,
     registry: &McpRegistry,
 ) {
     entries.retain(|(name, _), _| registry.resolve(name).is_some());
@@ -221,9 +247,9 @@ fn sweep_deregistered(
 
 async fn build_upstream_client(
     url: &str,
-    identity: &Identity,
+    injection: &ResolvedInjection,
 ) -> Result<UpstreamClient, GatewayError> {
-    let headers = identity.header_map()?;
+    let headers = injection.header_map()?;
     let config =
         StreamableHttpClientTransportConfig::with_uri(url.to_string()).custom_headers(headers);
     let transport = StreamableHttpClientTransport::from_config(config);
@@ -236,21 +262,22 @@ async fn build_upstream_client(
     })
 }
 
-/// The core dispatch: resolve the registry, fail closed on an unbound
-/// identity, then get-or-build the cached upstream client. No network call
-/// happens until both checks pass.
+/// The core dispatch: resolve the registry, fail closed on any `required`
+/// injection rule whose key is absent, then get-or-build the cached upstream
+/// client. No network call happens until both checks pass.
 async fn resolve_upstream(
     registry: &McpRegistry,
     context: &ContextStore,
     clients: &ClientCache,
+    config: &McpGatewayConfig,
     server: &str,
 ) -> Result<Arc<UpstreamClient>, GatewayError> {
     let url = registry
         .resolve(server)
         .ok_or_else(|| GatewayError::UnknownServer(server.to_string()))?;
-    let identity = Identity::from_context(&context.resolve())?;
+    let injection = ResolvedInjection::resolve(config, &context.resolve())?;
     clients
-        .get_or_build(registry, server, &url, &identity)
+        .get_or_build(registry, server, &url, &injection)
         .await
 }
 
@@ -271,13 +298,14 @@ fn server_name_from_context(context: &RequestContext<RoleServer>) -> Result<Stri
 
 /// The MCP server the sandbox connects to. Delegates `list_tools`/
 /// `call_tool` to whichever upstream the request's `/mcp/{server}` path
-/// names, with the tenant identity injected on the gateway's own upstream
-/// connection.
+/// names, with the configured identity headers injected on the gateway's own
+/// upstream connection.
 #[derive(Clone)]
 struct GatewayHandler {
     registry: Arc<McpRegistry>,
     context: Arc<ContextStore>,
     clients: Arc<ClientCache>,
+    config: Arc<McpGatewayConfig>,
 }
 
 impl GatewayHandler {
@@ -286,9 +314,15 @@ impl GatewayHandler {
         context: &RequestContext<RoleServer>,
     ) -> Result<Arc<UpstreamClient>, McpError> {
         let server = server_name_from_context(context).map_err(GatewayError::into_mcp_error)?;
-        resolve_upstream(&self.registry, &self.context, &self.clients, &server)
-            .await
-            .map_err(GatewayError::into_mcp_error)
+        resolve_upstream(
+            &self.registry,
+            &self.context,
+            &self.clients,
+            &self.config,
+            &server,
+        )
+        .await
+        .map_err(GatewayError::into_mcp_error)
     }
 }
 
@@ -326,11 +360,20 @@ impl ServerHandler for GatewayHandler {
 /// served by one shared `StreamableHttpService<GatewayHandler>` (so MCP
 /// session state persists across requests within a session); `server` is
 /// recovered per-request from the literal path, not from routing state.
-pub fn mcp_gateway_router(registry: Arc<McpRegistry>, context: Arc<ContextStore>) -> Router {
+///
+/// `config` supplies the context-key → header injection rules; this crate
+/// has no built-in notion of tenant identity, so an empty `config.inject`
+/// forwards calls with no injected headers at all (see `McpGatewayConfig`).
+pub fn mcp_gateway_router(
+    registry: Arc<McpRegistry>,
+    context: Arc<ContextStore>,
+    config: Arc<McpGatewayConfig>,
+) -> Router {
     let handler = GatewayHandler {
         registry,
         context,
         clients: Arc::new(ClientCache::default()),
+        config,
     };
     let service = StreamableHttpService::new(
         move || Ok(handler.clone()),
@@ -365,6 +408,32 @@ mod tests {
     use rmcp::transport::streamable_http_server::StreamableHttpService as SrvHttpService;
     use std::net::SocketAddr;
 
+    /// Generic config reproducing the old hardcoded org/workspace/user
+    /// contract: three `required` rules, so a downstream broker wanting the
+    /// old fail-closed-on-any-missing-key behavior gets it back via config,
+    /// not code.
+    fn three_required_rules() -> McpGatewayConfig {
+        McpGatewayConfig {
+            inject: vec![
+                IdentityHeaderRule {
+                    context_key: "org".to_string(),
+                    header: "x-org-id".to_string(),
+                    required: true,
+                },
+                IdentityHeaderRule {
+                    context_key: "workspace".to_string(),
+                    header: "x-workspace-id".to_string(),
+                    required: true,
+                },
+                IdentityHeaderRule {
+                    context_key: "user".to_string(),
+                    header: "x-user-id".to_string(),
+                    required: true,
+                },
+            ],
+        }
+    }
+
     fn bound_context() -> ContextStore {
         ContextStore::new(HashMap::from([
             ("org".to_string(), "acme".to_string()),
@@ -380,8 +449,9 @@ mod tests {
         let registry = McpRegistry::new();
         let context = bound_context();
         let clients = ClientCache::default();
+        let config = three_required_rules();
 
-        let err = resolve_upstream(&registry, &context, &clients, "missing")
+        let err = resolve_upstream(&registry, &context, &clients, &config, "missing")
             .await
             .expect_err("unregistered server must error");
 
@@ -400,8 +470,9 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         let context = bound_context();
         let clients = ClientCache::default();
+        let config = three_required_rules();
 
-        let err = resolve_upstream(&registry, &context, &clients, "alpha")
+        let err = resolve_upstream(&registry, &context, &clients, &config, "alpha")
             .await
             .expect_err("expired server must error");
 
@@ -417,8 +488,9 @@ mod tests {
         registry.register("alpha".to_string(), "http://127.0.0.1:1".to_string(), None);
         let context = ContextStore::new(HashMap::new());
         let clients = ClientCache::default();
+        let config = three_required_rules();
 
-        let err = resolve_upstream(&registry, &context, &clients, "alpha")
+        let err = resolve_upstream(&registry, &context, &clients, &config, "alpha")
             .await
             .expect_err("unbound context must fail closed");
 
@@ -435,12 +507,59 @@ mod tests {
             ("workspace".to_string(), "ws1".to_string()),
         ]));
         let clients = ClientCache::default();
+        let config = three_required_rules();
 
-        let err = resolve_upstream(&registry, &context, &clients, "alpha")
+        let err = resolve_upstream(&registry, &context, &clients, &config, "alpha")
             .await
             .expect_err("partially bound context must fail closed");
 
-        assert_eq!(err, GatewayError::Unbound("user"));
+        assert_eq!(err, GatewayError::Unbound("user".to_string()));
+    }
+
+    #[tokio::test]
+    async fn optional_rule_with_absent_key_is_simply_omitted() {
+        // A rule with `required: false` whose context_key is absent must not
+        // fail closed — the header is just omitted and the call proceeds.
+        let upstream_addr = spawn_echo_upstream().await;
+        let registry = Arc::new(McpRegistry::new());
+        registry.register(
+            "echo-server".to_string(),
+            format!("http://{upstream_addr}/mcp"),
+            None,
+        );
+
+        let config = Arc::new(McpGatewayConfig {
+            inject: vec![
+                IdentityHeaderRule {
+                    context_key: "org".to_string(),
+                    header: "x-org-id".to_string(),
+                    required: true,
+                },
+                IdentityHeaderRule {
+                    context_key: "nickname".to_string(),
+                    header: "x-nickname".to_string(),
+                    required: false,
+                },
+            ],
+        });
+        // "nickname" is deliberately absent from the bound overlay.
+        let context = Arc::new(ContextStore::new(HashMap::new()));
+        context.push(
+            HashMap::from([("org".to_string(), "acme-corp".to_string())]),
+            None,
+        );
+
+        let gateway_addr = spawn_gateway(registry, context, config).await;
+        let client = connect_sandbox_client(gateway_addr, "echo-server", HashMap::new()).await;
+
+        let echoed = call_echo(&client).await;
+
+        assert_eq!(
+            echoed, "acme-corp",
+            "the call must still succeed and forward the required header \
+             even though the optional rule's key was absent"
+        );
+        client.cancel().await.ok();
     }
 
     // ---- DNS-rebinding protection (rmcp default allowed_hosts) -------
@@ -457,7 +576,8 @@ mod tests {
 
         let registry = Arc::new(McpRegistry::new());
         let context = Arc::new(bound_context());
-        let router = mcp_gateway_router(registry, context);
+        let config = Arc::new(three_required_rules());
+        let router = mcp_gateway_router(registry, context, config);
 
         let req = Request::builder()
             .method("POST")
@@ -537,8 +657,12 @@ mod tests {
         addr
     }
 
-    async fn spawn_gateway(registry: Arc<McpRegistry>, context: Arc<ContextStore>) -> SocketAddr {
-        let router = mcp_gateway_router(registry, context);
+    async fn spawn_gateway(
+        registry: Arc<McpRegistry>,
+        context: Arc<ContextStore>,
+        config: Arc<McpGatewayConfig>,
+    ) -> SocketAddr {
+        let router = mcp_gateway_router(registry, context, config);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback listener");
@@ -605,7 +729,8 @@ mod tests {
             None,
         );
 
-        let gateway_addr = spawn_gateway(registry, context).await;
+        let config = Arc::new(three_required_rules());
+        let gateway_addr = spawn_gateway(registry, context, config).await;
         let client = connect_sandbox_client(gateway_addr, "echo-server", HashMap::new()).await;
 
         let echoed = call_echo(&client).await;
@@ -622,47 +747,100 @@ mod tests {
         let registry = McpRegistry::new();
         registry.register("alpha".to_string(), url.clone(), None);
 
-        let identity_a = Identity {
-            org: "org-a".to_string(),
-            workspace: "ws".to_string(),
-            user: "u".to_string(),
-        };
+        let injection_a = ResolvedInjection(vec![
+            ("x-org-id".to_string(), "org-a".to_string()),
+            ("x-user-id".to_string(), "u".to_string()),
+            ("x-workspace-id".to_string(), "ws".to_string()),
+        ]);
         let client_a_first = clients
-            .get_or_build(&registry, "alpha", &url, &identity_a)
+            .get_or_build(&registry, "alpha", &url, &injection_a)
             .await
-            .expect("build client for identity_a");
+            .expect("build client for injection_a");
 
-        // Same identity, same server: reused, not rebuilt.
+        // Same resolved injection, same server: reused, not rebuilt.
         let client_a_second = clients
-            .get_or_build(&registry, "alpha", &url, &identity_a)
+            .get_or_build(&registry, "alpha", &url, &injection_a)
             .await
-            .expect("resolve cached client for identity_a");
+            .expect("resolve cached client for injection_a");
         assert!(
             Arc::ptr_eq(&client_a_first, &client_a_second),
-            "unchanged identity must reuse the cached client, not rebuild it"
+            "unchanged resolved injection must reuse the cached client, not rebuild it"
         );
 
-        let identity_b = Identity {
-            org: "org-b".to_string(),
-            workspace: "ws".to_string(),
-            user: "u".to_string(),
-        };
+        let injection_b = ResolvedInjection(vec![
+            ("x-org-id".to_string(), "org-b".to_string()),
+            ("x-user-id".to_string(), "u".to_string()),
+            ("x-workspace-id".to_string(), "ws".to_string()),
+        ]);
         let client_b = clients
-            .get_or_build(&registry, "alpha", &url, &identity_b)
+            .get_or_build(&registry, "alpha", &url, &injection_b)
             .await
-            .expect("build client for identity_b");
+            .expect("build client for injection_b");
 
         assert!(
             !Arc::ptr_eq(&client_a_first, &client_b),
-            "changed identity must rebuild the upstream client, not reuse the old one"
+            "changed resolved injection must rebuild the upstream client, not reuse the old one"
         );
         let guard = clients.entries.lock().await;
         assert_eq!(
             guard.len(),
             1,
-            "the stale identity_a entry for 'alpha' must be evicted, not accumulated"
+            "the stale injection_a entry for 'alpha' must be evicted, not accumulated"
         );
-        assert!(guard.contains_key(&("alpha".to_string(), identity_b)));
+        assert!(guard.contains_key(&("alpha".to_string(), injection_b)));
+    }
+
+    #[tokio::test]
+    async fn different_resolved_identities_get_different_cached_clients() {
+        // End-to-end version of the cache-isolation guarantee: two gateway
+        // calls under different bound identities must never share an
+        // upstream client, proven by two live sandbox connections routed
+        // through the same running gateway with different `ContextStore`
+        // overlays.
+        let upstream_addr = spawn_echo_upstream().await;
+        let registry = Arc::new(McpRegistry::new());
+        registry.register(
+            "echo-server".to_string(),
+            format!("http://{upstream_addr}/mcp"),
+            None,
+        );
+        let config = Arc::new(three_required_rules());
+
+        let context_a = Arc::new(ContextStore::new(HashMap::new()));
+        context_a.push(
+            HashMap::from([
+                ("org".to_string(), "acme-corp".to_string()),
+                ("workspace".to_string(), "ws-1".to_string()),
+                ("user".to_string(), "u-42".to_string()),
+            ]),
+            None,
+        );
+        let gateway_a_addr = spawn_gateway(registry.clone(), context_a, config.clone()).await;
+        let client_a = connect_sandbox_client(gateway_a_addr, "echo-server", HashMap::new()).await;
+        let echoed_a = call_echo(&client_a).await;
+        assert_eq!(echoed_a, "acme-corp");
+
+        let context_b = Arc::new(ContextStore::new(HashMap::new()));
+        context_b.push(
+            HashMap::from([
+                ("org".to_string(), "beta-corp".to_string()),
+                ("workspace".to_string(), "ws-2".to_string()),
+                ("user".to_string(), "u-7".to_string()),
+            ]),
+            None,
+        );
+        let gateway_b_addr = spawn_gateway(registry, context_b, config).await;
+        let client_b = connect_sandbox_client(gateway_b_addr, "echo-server", HashMap::new()).await;
+        let echoed_b = call_echo(&client_b).await;
+
+        assert_eq!(
+            echoed_b, "beta-corp",
+            "a different resolved identity must reach upstream with its own headers, \
+             never reusing the other identity's cached client"
+        );
+
+        client_a.cancel().await.ok();
+        client_b.cancel().await.ok();
     }
 
     /// Second in-process upstream, distinguishable from `EchoUpstream`:
@@ -746,7 +924,8 @@ mod tests {
             None,
         );
 
-        let gateway_addr = spawn_gateway(registry.clone(), context).await;
+        let config = Arc::new(three_required_rules());
+        let gateway_addr = spawn_gateway(registry.clone(), context, config).await;
         let client = connect_sandbox_client(gateway_addr, "alpha", HashMap::new()).await;
 
         let first = call_echo(&client).await;
@@ -793,7 +972,8 @@ mod tests {
             None,
         );
 
-        let gateway_addr = spawn_gateway(registry, context).await;
+        let config = Arc::new(three_required_rules());
+        let gateway_addr = spawn_gateway(registry, context, config).await;
         // The sandbox tries to spoof its own identity header when talking to
         // the gateway; the gateway must never forward it.
         let spoofed_headers = HashMap::from([(
@@ -823,7 +1003,8 @@ mod tests {
             ("user".to_string(), "u1".to_string()),
         ])));
 
-        let gateway_addr = spawn_gateway(registry, context).await;
+        let config = Arc::new(three_required_rules());
+        let gateway_addr = spawn_gateway(registry, context, config).await;
         let client = connect_sandbox_client(gateway_addr, "does-not-exist", HashMap::new()).await;
 
         let err = client
@@ -855,8 +1036,9 @@ mod tests {
         );
         let context = bound_context();
         let clients = ClientCache::default();
+        let config = three_required_rules();
 
-        resolve_upstream(&registry, &context, &clients, "alpha")
+        resolve_upstream(&registry, &context, &clients, &config, "alpha")
             .await
             .expect("cache a client for alpha");
         {
@@ -874,7 +1056,7 @@ mod tests {
             None,
         );
 
-        resolve_upstream(&registry, &context, &clients, "beta")
+        resolve_upstream(&registry, &context, &clients, &config, "beta")
             .await
             .expect("cache a client for beta; this call also sweeps stale entries");
 
@@ -905,8 +1087,9 @@ mod tests {
         );
         let context = bound_context();
         let clients = ClientCache::default();
+        let config = three_required_rules();
 
-        resolve_upstream(&registry, &context, &clients, "alpha")
+        resolve_upstream(&registry, &context, &clients, &config, "alpha")
             .await
             .expect("cache a client for alpha before it expires");
 
@@ -917,7 +1100,7 @@ mod tests {
             format!("http://{beta_upstream_addr}/mcp"),
             None,
         );
-        resolve_upstream(&registry, &context, &clients, "beta")
+        resolve_upstream(&registry, &context, &clients, &config, "beta")
             .await
             .expect("cache a client for beta; this call also sweeps expired entries");
 

@@ -54,5 +54,5 @@ pub mod gateway;
 pub mod registry;
 
 pub use admin::mcp_admin_router;
-pub use gateway::mcp_gateway_router;
+pub use gateway::{mcp_gateway_router, IdentityHeaderRule, McpGatewayConfig};
 pub use registry::{McpRegistry, RegisteredUpstream};

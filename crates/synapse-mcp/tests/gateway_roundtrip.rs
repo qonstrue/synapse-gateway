@@ -24,8 +24,36 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::{ErrorData as McpError, RoleClient, ServerHandler, ServiceExt};
 use synapse_context::ContextStore;
-use synapse_mcp::{mcp_admin_router, mcp_gateway_router, McpRegistry};
+use synapse_mcp::{
+    mcp_admin_router, mcp_gateway_router, IdentityHeaderRule, McpGatewayConfig, McpRegistry,
+};
 use tower::ServiceExt as _; // oneshot
+
+/// Generic config reproducing the org/workspace/user identity contract for
+/// this integration test — this crate itself has no hardcoded notion of
+/// identity, so the test supplies the rules the way a downstream broker
+/// would.
+fn three_required_rules() -> McpGatewayConfig {
+    McpGatewayConfig {
+        inject: vec![
+            IdentityHeaderRule {
+                context_key: "org".to_string(),
+                header: "x-org-id".to_string(),
+                required: true,
+            },
+            IdentityHeaderRule {
+                context_key: "workspace".to_string(),
+                header: "x-workspace-id".to_string(),
+                required: true,
+            },
+            IdentityHeaderRule {
+                context_key: "user".to_string(),
+                header: "x-user-id".to_string(),
+                required: true,
+            },
+        ],
+    }
+}
 
 /// Fake "platform" upstream: a single tool `dispatch_echo` that echoes the
 /// caller's `x-org-id` header back as the tool result text (empty string if
@@ -93,8 +121,9 @@ async fn spawn_platform_upstream() -> SocketAddr {
 async fn spawn_gateway(
     registry: std::sync::Arc<McpRegistry>,
     context: std::sync::Arc<ContextStore>,
+    config: std::sync::Arc<McpGatewayConfig>,
 ) -> SocketAddr {
-    let router = mcp_gateway_router(registry, context);
+    let router = mcp_gateway_router(registry, context, config);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback listener");
@@ -169,7 +198,8 @@ async fn bound_identity_reaches_platform_upstream_registered_via_admin_router() 
         None,
     );
 
-    let gateway_addr = spawn_gateway(registry, context).await;
+    let config = std::sync::Arc::new(three_required_rules());
+    let gateway_addr = spawn_gateway(registry, context, config).await;
     let client = connect_client(gateway_addr, "platform").await;
 
     let result = client
@@ -206,7 +236,8 @@ async fn call_is_rejected_when_no_identity_is_bound() {
     // gateway must fail closed rather than forward the call upstream.
     let context = std::sync::Arc::new(ContextStore::new(HashMap::new()));
 
-    let gateway_addr = spawn_gateway(registry, context).await;
+    let config = std::sync::Arc::new(three_required_rules());
+    let gateway_addr = spawn_gateway(registry, context, config).await;
     let client = connect_client(gateway_addr, "platform").await;
 
     let err = client

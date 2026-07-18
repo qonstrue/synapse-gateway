@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use synapse_mcp::{mcp_admin_router, mcp_gateway_router, McpRegistry};
+use synapse_mcp::{
+    mcp_admin_router, mcp_gateway_router, IdentityHeaderRule, McpGatewayConfig, McpRegistry,
+};
 use synapse_proxy::admin::admin_router;
 use synapse_proxy::build_router;
 use synapse_proxy::config::Config;
@@ -47,7 +49,36 @@ async fn main() -> anyhow::Result<()> {
     let data = build_router(state);
     let admin = admin_router(built.context.clone()).merge(mcp_admin_router(mcp_registry.clone()));
     let metrics_app = metrics_router(registry);
-    let mcp_app = mcp_gateway_router(mcp_registry.clone(), built.context.clone());
+    // TEMPORARY: synapse-mcp's identity injection is now config-driven and
+    // has no hardcoded notion of org/workspace/user (see synapse-mcp's
+    // gateway config-driven-identity-injection refactor). This inline config
+    // reproduces the old hardcoded 3-header contract so synapse-proxy keeps
+    // building; a follow-up task replaces this wiring entirely with whatever
+    // the downstream broker-mediated dispatch design supplies instead.
+    let mcp_gateway_config = Arc::new(McpGatewayConfig {
+        inject: vec![
+            IdentityHeaderRule {
+                context_key: "org".to_string(),
+                header: "x-org-id".to_string(),
+                required: true,
+            },
+            IdentityHeaderRule {
+                context_key: "workspace".to_string(),
+                header: "x-workspace-id".to_string(),
+                required: true,
+            },
+            IdentityHeaderRule {
+                context_key: "user".to_string(),
+                header: "x-user-id".to_string(),
+                required: true,
+            },
+        ],
+    });
+    let mcp_app = mcp_gateway_router(
+        mcp_registry.clone(),
+        built.context.clone(),
+        mcp_gateway_config,
+    );
 
     let data_l = tokio::net::TcpListener::bind(&built.addr).await?;
     let admin_l = tokio::net::TcpListener::bind(&built.admin_addr).await?;

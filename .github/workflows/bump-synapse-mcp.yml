@@ -42,4 +42,4 @@ jobs:
       - name: Trigger Release workflow
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run release.yml --ref "${{ steps.bump.outputs.tag }}" -f crate=synapse-mcp
+        run: gh workflow run release-libs.yml --ref "${{ steps.bump.outputs.tag }}" -f crate=synapse-mcp

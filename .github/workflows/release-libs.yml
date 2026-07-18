@@ -1,16 +1,20 @@
-name: Release
+name: Release library crate
+
+# Publishes the library crates (synapse-context, synapse-mcp) to crates.io.
+# These ship no binary/Docker image, so they have a separate workflow from the
+# binary-crate `release.yml`. Publish order matters: synapse-context must be on
+# crates.io before synapse-mcp (which depends on it).
 
 on:
   push:
-    tags: ["synapse-gateway-v*", "synapse-proxy-v*"]
-    branches: [main]
+    tags: ["synapse-context-v*", "synapse-mcp-v*"]
   workflow_dispatch:
     inputs:
       crate:
-        description: Crate to release
+        description: Library crate to release
         required: true
         type: choice
-        options: [synapse-gateway, synapse-proxy]
+        options: [synapse-context, synapse-mcp]
 
 permissions:
   contents: read
@@ -29,26 +33,22 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            NAME="${GITHUB_REF_NAME}"               # e.g. synapse-proxy-v0.1.0
+            NAME="${GITHUB_REF_NAME}"               # e.g. synapse-context-v0.1.0
             echo "crate=${NAME%-v*}" >> "$GITHUB_OUTPUT"
             echo "version=${NAME##*-v}" >> "$GITHUB_OUTPUT"
             echo "is_tag=true" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          else
             CRATE="${{ github.event.inputs.crate }}"
             VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r --arg c "$CRATE" '.packages[] | select(.name==$c) | .version')"
             echo "crate=${CRATE}" >> "$GITHUB_OUTPUT"
             echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-            echo "is_tag=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "crate=" >> "$GITHUB_OUTPUT"   # main push → edge job handles it
-            echo "version=" >> "$GITHUB_OUTPUT"
             echo "is_tag=false" >> "$GITHUB_OUTPUT"
           fi
 
   publish-crate:
     name: Publish crate (crates.io)
     needs: resolve
-    if: needs.resolve.outputs.crate != '' && (needs.resolve.outputs.is_tag == 'true' || github.event_name == 'workflow_dispatch')
+    if: needs.resolve.outputs.crate != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,58 +88,3 @@ jobs:
         run: cargo publish -p ${{ needs.resolve.outputs.crate }} --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-  docker:
-    name: Build & push image (Docker Hub)
-    needs: resolve
-    if: needs.resolve.outputs.crate != '' && (needs.resolve.outputs.is_tag == 'true' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: sustentabilitas/${{ needs.resolve.outputs.crate }}
-          tags: |
-            type=raw,value=${{ needs.resolve.outputs.version }}
-            type=raw,value=latest,enable=${{ needs.resolve.outputs.is_tag == 'true' }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: crates/${{ needs.resolve.outputs.crate }}/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  edge:
-    name: Build & push edge image (${{ matrix.crate }})
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        crate: [synapse-gateway, synapse-proxy]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: crates/${{ matrix.crate }}/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: sustentabilitas/${{ matrix.crate }}:edge
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

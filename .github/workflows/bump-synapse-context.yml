@@ -1,0 +1,45 @@
+name: Bump & release synapse-context
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Semver component to increment
+        required: true
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: bump-synapse-context
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump version, tag, and push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump, commit, tag, and push
+        id: bump
+        run: bash .github/scripts/bump-and-release.sh synapse-context "${{ inputs.bump }}"
+
+      - name: Trigger Release workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --ref "${{ steps.bump.outputs.tag }}" -f crate=synapse-context

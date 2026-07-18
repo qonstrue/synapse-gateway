@@ -4121,7 +4121,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-context"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "synapse-gateway"

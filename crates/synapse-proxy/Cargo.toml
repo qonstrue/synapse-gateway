@@ -18,7 +18,6 @@ name = "synapse-proxy"
 path = "src/main.rs"
 
 [dependencies]
-synapse-mcp = { path = "../synapse-mcp", version = "0.1.0" }
 synapse-context = { workspace = true }
 async-trait = "0.1"
 tokio = { workspace = true }

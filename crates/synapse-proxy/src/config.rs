@@ -12,14 +12,10 @@ pub struct Config {
     pub admin_addr: String,
     #[serde(default = "default_metrics_addr")]
     pub metrics_addr: String,
-    #[serde(default = "default_mcp_addr")]
-    pub mcp_addr: String,
     #[serde(default)]
     pub context: ContextConfig,
     #[serde(default)]
     pub routes: Vec<Route>,
-    #[serde(default)]
-    pub mcp_upstreams: Vec<McpUpstreamConfig>,
 }
 
 fn default_addr() -> String {
@@ -30,20 +26,6 @@ fn default_admin_addr() -> String {
 }
 fn default_metrics_addr() -> String {
     "0.0.0.0:9090".into()
-}
-fn default_mcp_addr() -> String {
-    "127.0.0.1:8789".into()
-}
-
-/// A statically-seeded upstream MCP server registered into the
-/// `McpRegistry` at startup (in addition to whatever the admin surface
-/// registers/hot-swaps at runtime).
-#[derive(Debug, Clone, Deserialize)]
-pub struct McpUpstreamConfig {
-    pub name: String,
-    pub url: String,
-    #[serde(default)]
-    pub ttl_seconds: Option<u64>,
 }
 
 /// Context sources. `static_values` are TOML literals; `env` maps a context key
@@ -187,8 +169,6 @@ mod tests {
         let c = Config::from_toml_str(SAMPLE).unwrap();
         assert_eq!(c.admin_addr, "127.0.0.1:8788");
         assert_eq!(c.metrics_addr, "0.0.0.0:9090");
-        assert_eq!(c.mcp_addr, "127.0.0.1:8789"); // default, not set in SAMPLE
-        assert!(c.mcp_upstreams.is_empty());
         assert_eq!(
             c.context.static_values.get("tenant").map(String::as_str),
             Some("acme")
@@ -209,25 +189,6 @@ mod tests {
             call.response_steps[0],
             ResponseStep::ErrorRemap(_)
         ));
-    }
-
-    #[test]
-    fn mcp_addr_and_upstreams_parse_when_set() {
-        let c = Config::from_toml_str(
-            r#"
-            mcp_addr = "127.0.0.1:9999"
-            [[mcp_upstreams]]
-            name = "platform"
-            url = "http://127.0.0.1:7000/mcp"
-            ttl_seconds = 3600
-        "#,
-        )
-        .unwrap();
-        assert_eq!(c.mcp_addr, "127.0.0.1:9999");
-        assert_eq!(c.mcp_upstreams.len(), 1);
-        assert_eq!(c.mcp_upstreams[0].name, "platform");
-        assert_eq!(c.mcp_upstreams[0].url, "http://127.0.0.1:7000/mcp");
-        assert_eq!(c.mcp_upstreams[0].ttl_seconds, Some(3600));
     }
 
     #[test]

@@ -4200,7 +4200,6 @@ dependencies = [
  "serde",
  "serde_json",
  "synapse-context",
- "synapse-mcp",
  "tokio",
  "toml",
  "tower 0.5.3",

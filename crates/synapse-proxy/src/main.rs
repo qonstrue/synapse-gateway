@@ -1,9 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use synapse_mcp::{
-    mcp_admin_router, mcp_gateway_router, IdentityHeaderRule, McpGatewayConfig, McpRegistry,
-};
 use synapse_proxy::admin::admin_router;
 use synapse_proxy::build_router;
 use synapse_proxy::config::Config;
@@ -28,15 +25,6 @@ async fn main() -> anyhow::Result<()> {
     let (metrics, registry) = Metrics::new()?;
     let http_client = http_client::build_http_client()?;
 
-    let mcp_registry = Arc::new(McpRegistry::new());
-    for seed in &built.mcp_upstreams {
-        mcp_registry.register(
-            seed.name.clone(),
-            seed.url.clone(),
-            seed.ttl_seconds.map(std::time::Duration::from_secs),
-        );
-    }
-
     let shutting_down = Arc::new(AtomicBool::new(false));
     let state = AppState {
         routes: Arc::new(built.routes),
@@ -47,44 +35,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let data = build_router(state);
-    let admin = admin_router(built.context.clone()).merge(mcp_admin_router(mcp_registry.clone()));
+    let admin = admin_router(built.context.clone());
     let metrics_app = metrics_router(registry);
-    // TEMPORARY: synapse-mcp's identity injection is now config-driven and
-    // has no hardcoded notion of org/workspace/user (see synapse-mcp's
-    // gateway config-driven-identity-injection refactor). This inline config
-    // reproduces the old hardcoded 3-header contract so synapse-proxy keeps
-    // building; a follow-up task replaces this wiring entirely with whatever
-    // the downstream broker-mediated dispatch design supplies instead.
-    let mcp_gateway_config = Arc::new(McpGatewayConfig {
-        inject: vec![
-            IdentityHeaderRule {
-                context_key: "org".to_string(),
-                header: "x-org-id".to_string(),
-                required: true,
-            },
-            IdentityHeaderRule {
-                context_key: "workspace".to_string(),
-                header: "x-workspace-id".to_string(),
-                required: true,
-            },
-            IdentityHeaderRule {
-                context_key: "user".to_string(),
-                header: "x-user-id".to_string(),
-                required: true,
-            },
-        ],
-    });
-    let mcp_app = mcp_gateway_router(
-        mcp_registry.clone(),
-        built.context.clone(),
-        mcp_gateway_config,
-    );
 
     let data_l = tokio::net::TcpListener::bind(&built.addr).await?;
     let admin_l = tokio::net::TcpListener::bind(&built.admin_addr).await?;
     let metrics_l = tokio::net::TcpListener::bind(&built.metrics_addr).await?;
-    let mcp_l = tokio::net::TcpListener::bind(&built.mcp_addr).await?;
-    tracing::info!(data = %built.addr, admin = %built.admin_addr, metrics = %built.metrics_addr, mcp = %built.mcp_addr, "synapse-proxy listening");
+    tracing::info!(data = %built.addr, admin = %built.admin_addr, metrics = %built.metrics_addr, "synapse-proxy listening");
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -104,14 +61,11 @@ async fn main() -> anyhow::Result<()> {
         axum::serve(admin_l, admin).with_graceful_shutdown(shutdown_wait(shutdown_rx.clone()));
     let metrics_srv = axum::serve(metrics_l, metrics_app)
         .with_graceful_shutdown(shutdown_wait(shutdown_rx.clone()));
-    let mcp_srv =
-        axum::serve(mcp_l, mcp_app).with_graceful_shutdown(shutdown_wait(shutdown_rx.clone()));
 
     tokio::try_join!(
         async { data_srv.await.map_err(anyhow::Error::from) },
         async { admin_srv.await.map_err(anyhow::Error::from) },
         async { metrics_srv.await.map_err(anyhow::Error::from) },
-        async { mcp_srv.await.map_err(anyhow::Error::from) },
     )?;
     Ok(())
 }

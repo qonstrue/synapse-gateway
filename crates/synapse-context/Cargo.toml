@@ -3,6 +3,7 @@ name = "synapse-context"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Shared bound-context store (base ⊕ TTL'd overlay), reused verbatim by synapse-proxy and synapse-mcp without a cyclic path dependency between them."
 
 [lib]

@@ -28,4 +28,4 @@ futures = "0.3"
 bytes = "1"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 rmcp = { version = "2.2", features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
-synapse-context = { path = "crates/synapse-context" }
+synapse-context = { path = "crates/synapse-context", version = "0.1.0" }

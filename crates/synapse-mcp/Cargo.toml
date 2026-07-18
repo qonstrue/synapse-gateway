@@ -3,6 +3,8 @@ name = "synapse-mcp"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "On-demand MCP gateway for the synapse-proxy sandbox broker: transparent per-server routing over Streamable HTTP with per-session tenant-identity injection from a shared ContextStore."
 
 [lib]
 name = "synapse_mcp"

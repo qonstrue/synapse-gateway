@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.37] - 2026-09-26
+
 ### Added
 
 - `SYNAPSE_PROVIDER_VALIDATION=lenient`: a route referencing a provider this

@@ -19,6 +19,8 @@ pub struct Config {
     pub embed_default_input_per_mtok: f64,
     /// Provider credentials/base-urls, read straight from the env map.
     pub env: HashMap<String, String>,
+    /// How to treat a route whose provider this process cannot satisfy.
+    pub provider_validation: ProviderValidation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +65,39 @@ fn parse_ledger_backends(list: &str) -> anyhow::Result<Vec<LedgerBackend>> {
         anyhow::bail!("SYNAPSE_LEDGER_BACKENDS resolved to an empty backend list");
     }
     Ok(out)
+}
+
+/// What to do when a route table references a provider this process cannot build —
+/// a credential absent from the env, or an id this binary does not recognise.
+///
+/// `Strict` (the default) refuses to start. That is the right default for a
+/// dedicated gateway: a route table it cannot fully serve is a deploy mistake,
+/// and failing at boot surfaces it immediately.
+///
+/// `Lenient` drops the legs it cannot serve, keeps the rest of each route, and
+/// starts. It exists because one route table is commonly shared by several
+/// processes — a gateway plus in-process consumers — and a leg added for one of
+/// them should not take the others down. A route left with no legs disappears
+/// from the table, so calling it is a 404 rather than a crash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProviderValidation {
+    #[default]
+    Strict,
+    Lenient,
+}
+
+impl ProviderValidation {
+    /// `SYNAPSE_PROVIDER_VALIDATION=lenient` opts in; anything else is strict.
+    pub fn from_env(env: &HashMap<String, String>) -> Self {
+        match env
+            .get("SYNAPSE_PROVIDER_VALIDATION")
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("lenient") => Self::Lenient,
+            _ => Self::Strict,
+        }
+    }
 }
 
 /// Resolve the GCP project id for Vertex from an env map.
@@ -113,6 +148,7 @@ impl Config {
             .parse()
             .unwrap_or(0.10),
             env: env.clone(),
+            provider_validation: ProviderValidation::from_env(env),
         })
     }
 }
@@ -120,6 +156,35 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_validation_defaults_to_strict_and_opts_in_on_lenient() {
+        let cases = [
+            (vec![], ProviderValidation::Strict),
+            (
+                vec![("SYNAPSE_PROVIDER_VALIDATION", "lenient")],
+                ProviderValidation::Lenient,
+            ),
+            (
+                vec![("SYNAPSE_PROVIDER_VALIDATION", "  LENIENT  ")],
+                ProviderValidation::Lenient,
+            ),
+            (
+                vec![("SYNAPSE_PROVIDER_VALIDATION", "strict")],
+                ProviderValidation::Strict,
+            ),
+            // An unrecognised value must not silently loosen validation.
+            (
+                vec![("SYNAPSE_PROVIDER_VALIDATION", "yes")],
+                ProviderValidation::Strict,
+            ),
+        ];
+        for (pairs, want) in cases {
+            let e = env(&pairs);
+            assert_eq!(ProviderValidation::from_env(&e), want, "for {pairs:?}");
+            assert_eq!(Config::from_env_map(&e).unwrap().provider_validation, want);
+        }
+    }
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs

@@ -73,6 +73,34 @@ impl RouteTable {
             .collect()
     }
 
+    /// This table with every leg belonging to `drop` removed, and any route left
+    /// with no legs removed entirely.
+    ///
+    /// A multi-leg route survives on its remaining legs, so a route whose first
+    /// choice is unavailable degrades to its fallback instead of disappearing.
+    pub fn without_providers(&self, drop: &std::collections::HashSet<String>) -> Self {
+        let routes: HashMap<String, Vec<ChainLeg>> = self
+            .routes
+            .iter()
+            .map(|(name, legs)| {
+                let kept: Vec<ChainLeg> = legs
+                    .iter()
+                    .filter(|l| !drop.contains(&l.provider))
+                    .cloned()
+                    .collect();
+                (name.clone(), kept)
+            })
+            .filter(|(_, legs)| !legs.is_empty())
+            .collect();
+        let policies = self
+            .policies
+            .iter()
+            .filter(|(name, _)| routes.contains_key(*name))
+            .map(|(name, policy)| (name.clone(), policy.clone()))
+            .collect();
+        Self { routes, policies }
+    }
+
     /// Consecutive Vertex legs for Gemini-native passthrough fallback.
     ///
     /// Prefer a route whose first leg is `vertex` + `model` (lexicographically
@@ -149,6 +177,49 @@ mod tests {
         [routes."fast"]
         legs = [{ provider = "vertex", model = "gemini-3-flash" }]
     "#;
+
+    fn drop_set(ids: &[&str]) -> std::collections::HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn without_providers_keeps_a_route_alive_on_its_remaining_legs() {
+        let t = RouteTable::from_toml_str(SAMPLE)
+            .unwrap()
+            .without_providers(&drop_set(&["vertex"]));
+        // gemini-pro loses its vertex leg but still serves via qwen.
+        let legs = t.legs("gemini-pro").unwrap();
+        assert_eq!(legs.len(), 1);
+        assert_eq!(legs[0].provider, "qwen");
+        // fast was vertex-only, so the alias is gone rather than empty.
+        assert!(t.legs("fast").is_none());
+        assert_eq!(t.aliases(), vec!["gemini-pro".to_string()]);
+    }
+
+    #[test]
+    fn without_providers_is_a_no_op_when_nothing_matches() {
+        let before = RouteTable::from_toml_str(SAMPLE).unwrap();
+        let after = before.without_providers(&drop_set(&["typesafe"]));
+        assert_eq!(before.aliases(), after.aliases());
+        assert_eq!(after.legs("gemini-pro").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn without_providers_drops_the_policy_of_a_dropped_route() {
+        let with_policy = r#"
+            [routes."jev-first"]
+            policy = "default"
+            legs = [{ provider = "typesafe", model = "jev-latest" }]
+            [routes."kept"]
+            policy = "default"
+            legs = [{ provider = "vertex", model = "gemini-3-flash" }]
+        "#;
+        let t = RouteTable::from_toml_str(with_policy)
+            .unwrap()
+            .without_providers(&drop_set(&["typesafe"]));
+        assert!(t.policy_of("jev-first").is_none());
+        assert_eq!(t.policy_of("kept"), Some("default"));
+    }
 
     #[test]
     fn parses_and_resolves_legs_in_order() {

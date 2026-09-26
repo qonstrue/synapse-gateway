@@ -225,6 +225,7 @@ Both timeouts apply to the standard lane. The native Vertex lane is currently bo
 | `SYNAPSE_LEDGER_SNS_TOPIC_ARN` | — | SNS topic ARN. Required when `sns` is in the backend list (`ledger-sns` feature). |
 | `SYNAPSE_LEDGER_SNS_REGION` | — | AWS region for SNS. Optional; the AWS default credential chain is used if absent. |
 | `SYNAPSE_DEFAULT_TENANT` | `unattributed` | Tenant name used when `x-synapse-tenant` header is absent. |
+| `SYNAPSE_PROVIDER_VALIDATION` | `strict` | `strict` refuses to start when a route references a provider this process cannot build (credential unset, or an id this build does not know). `lenient` drops those legs, keeps each route's remaining legs, removes routes left with no legs, and starts — for a route table shared by several processes, where a leg added for one consumer should not stop the others. |
 | `SYNAPSE_REQUEST_TIMEOUT_SECS` | `120` | Time-to-first-chunk timeout in seconds. A leg that does not produce its first chunk within this window falls back to the next leg. |
 | `SYNAPSE_STREAM_IDLE_TIMEOUT_SECS` | `60` | Maximum inter-chunk idle gap in seconds. A leg that stalls mid-stream for this long is terminated. |
 | `TYPESAFE_API_KEY` | — | Enables the TypeSafe System One (Jev) passthrough at `POST /typesafe/v1/systemone`. Unset = lane off (the route returns 400). |

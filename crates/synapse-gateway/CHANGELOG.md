@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `SYNAPSE_PROVIDER_VALIDATION=lenient`: a route referencing a provider this
+  process cannot build no longer has to stop the process. Unservable legs are
+  dropped, each route keeps its remaining legs (so a route degrades to its
+  fallback), and a route left with no legs disappears from the table — calling
+  it is then a 404 rather than a crash. `strict` remains the default and is
+  unchanged. Public API: `config::ProviderValidation`,
+  `providers::unsatisfiable_providers`, `providers::Unsatisfiable`,
+  `RouteTable::without_providers`, `EmbeddingRouteTable::without_providers`.
+
+  Motivation: one `routes.toml` is commonly shared by a gateway and several
+  in-process consumers. Adding a leg for the gateway then crashlooped every
+  consumer that lacked that provider's credential — and a consumer running an
+  older build crashed on the unrecognised provider id even with the credential
+  present.
+
 ## [0.5.36] - 2026-09-23
 
 ### Fixed

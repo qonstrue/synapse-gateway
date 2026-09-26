@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use tracing_subscriber::{fmt, EnvFilter};
 
 use synapse::ai_task_type::AiTaskTypeTable;
-use synapse::config::{vertex_project_from_env, Config};
+use synapse::config::{vertex_project_from_env, Config, ProviderValidation};
 use synapse::embeddings::openai::OpenAiEmbedder;
 use synapse::embeddings::vertex::VertexEmbedder;
 use synapse::embeddings::EmbeddingProvider;
@@ -13,7 +13,7 @@ use synapse::jev_native::JevNativeProvider;
 use synapse::ledger::LedgerHandle;
 use synapse::pricing::PricingTable;
 use synapse::providers::vertex_auth::VertexAuth;
-use synapse::providers::Catalog;
+use synapse::providers::{unsatisfiable_providers, Catalog};
 use synapse::routing::embeddings::EmbeddingRouteTable;
 use synapse::routing::table::RouteTable;
 use synapse::server::router;
@@ -46,6 +46,44 @@ async fn main() -> Result<()> {
     let routes_content = std::fs::read_to_string(&config.routes_path)
         .with_context(|| format!("reading {}", config.routes_path))?;
     let routes = RouteTable::from_toml_str(&routes_content)?;
+    // Embedding aliases live in the same file under a different top-level table.
+    let embed_routes = EmbeddingRouteTable::from_toml_str(&routes_content)?;
+
+    // Under lenient validation, drop what this process cannot serve rather than
+    // refusing to start. One route table is commonly shared by a gateway and its
+    // in-process consumers; a leg added for one of them should not take the
+    // others down. Strict (the default) still fails fast below.
+    let (routes, embed_routes) = match config.provider_validation {
+        ProviderValidation::Strict => (routes, embed_routes),
+        ProviderValidation::Lenient => {
+            let referenced: std::collections::HashSet<String> = routes
+                .referenced_providers()
+                .union(&embed_routes.referenced_providers())
+                .cloned()
+                .collect();
+            let unsatisfiable = unsatisfiable_providers(&env, &referenced);
+            let drop: std::collections::HashSet<String> = unsatisfiable
+                .iter()
+                .map(|u| u.provider().to_string())
+                .collect();
+            for u in &unsatisfiable {
+                tracing::warn!(provider = %u.provider(), "dropping route legs: {u}");
+            }
+            let pruned = routes.without_providers(&drop);
+            let pruned_embed = embed_routes.without_providers(&drop);
+            if !drop.is_empty() {
+                tracing::warn!(
+                    dropped_providers = ?{ let mut v: Vec<&str> = drop.iter().map(String::as_str).collect(); v.sort(); v },
+                    aliases_before = routes.aliases().len(),
+                    aliases_after = pruned.aliases().len(),
+                    embedding_aliases_before = embed_routes.aliases().len(),
+                    embedding_aliases_after = pruned_embed.aliases().len(),
+                    "lenient provider validation pruned the route table"
+                );
+            }
+            (pruned, pruned_embed)
+        }
+    };
     let pricing = PricingTable::from_toml_str(
         &std::fs::read_to_string(&config.pricing_path)
             .with_context(|| format!("reading {}", config.pricing_path))?,
@@ -96,9 +134,7 @@ async fn main() -> Result<()> {
         ))
     });
 
-    // Parse embedding aliases from the same routes file (different top-level table)
-    // and build one embedder per referenced provider, mirroring Catalog::build creds.
-    let embed_routes = EmbeddingRouteTable::from_toml_str(&routes_content)?;
+    // One embedder per referenced provider, mirroring Catalog::build creds.
     let mut embedders: HashMap<String, Arc<dyn EmbeddingProvider>> = HashMap::new();
     for id in embed_routes.referenced_providers() {
         let embedder: Arc<dyn EmbeddingProvider> = match id.as_str() {

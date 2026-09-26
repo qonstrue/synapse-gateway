@@ -47,6 +47,32 @@ impl EmbeddingRouteTable {
         v
     }
 
+    /// This table with every leg belonging to `drop` removed, and any alias left
+    /// with no legs removed entirely. Mirrors `RouteTable::without_providers`.
+    pub fn without_providers(&self, drop: &HashSet<String>) -> Self {
+        let routes: HashMap<String, EmbeddingEntry> = self
+            .routes
+            .iter()
+            .map(|(alias, entry)| {
+                let legs: Vec<ChainLeg> = entry
+                    .legs
+                    .iter()
+                    .filter(|l| !drop.contains(&l.provider))
+                    .cloned()
+                    .collect();
+                (
+                    alias.clone(),
+                    EmbeddingEntry {
+                        dimensions: entry.dimensions,
+                        legs,
+                    },
+                )
+            })
+            .filter(|(_, entry)| !entry.legs.is_empty())
+            .collect();
+        Self { routes }
+    }
+
     pub fn referenced_providers(&self) -> HashSet<String> {
         self.routes
             .values()
@@ -58,6 +84,33 @@ impl EmbeddingRouteTable {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn without_providers_drops_legs_then_empty_aliases() {
+        let table = EmbeddingRouteTable::from_toml_str(
+            r#"
+            [embeddings."multi"]
+            dimensions = 768
+            legs = [
+              { provider = "vertex", model = "text-embedding-004" },
+              { provider = "openai", model = "text-embedding-3-small" },
+            ]
+            [embeddings."vertex-only"]
+            dimensions = 768
+            legs = [{ provider = "vertex", model = "text-embedding-004" }]
+        "#,
+        )
+        .unwrap()
+        .without_providers(&["vertex".to_string()].into_iter().collect());
+
+        // multi survives on openai, keeping its declared dimensions.
+        assert_eq!(table.legs("multi").unwrap().len(), 1);
+        assert_eq!(table.legs("multi").unwrap()[0].provider, "openai");
+        assert_eq!(table.dimensions("multi"), Some(768));
+        // vertex-only has nothing left to serve it.
+        assert!(table.legs("vertex-only").is_none());
+        assert_eq!(table.aliases(), vec!["multi".to_string()]);
+    }
+
     use super::*;
 
     const SAMPLE: &str = r#"

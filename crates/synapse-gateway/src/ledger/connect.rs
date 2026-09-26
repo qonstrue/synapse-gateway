@@ -183,6 +183,7 @@ mod tests {
                 "SYNAPSE_LEDGER_POSTGRES_DSN".into(),
                 "postgres://invalid.invalid:5432/nope".into(),
             )]),
+            provider_validation: crate::config::ProviderValidation::Strict,
         };
         let store = build_store(&config).await;
         // NoopLedger: record always succeeds without persisting.
@@ -228,6 +229,7 @@ mod tests {
             stream_idle_timeout: std::time::Duration::from_secs(60),
             embed_default_input_per_mtok: 0.10,
             env: HashMap::from([("SYNAPSE_LEDGER_SQLITE_DSN".into(), "sqlite::memory:".into())]),
+            provider_validation: crate::config::ProviderValidation::Strict,
         };
         let store = build_store(&config).await;
         let entry = crate::ledger::UsageEntry {

@@ -342,6 +342,7 @@ async fn primary_429_falls_over_to_secondary_vertex_leg() {
         Some(mock.uri()),
     );
     let store = Arc::new(InMemoryLedger::default());
+    let (metrics, exporter) = test_metrics();
     let gw = Gateway::builder()
         .routes(routes)
         .catalog(catalog)
@@ -352,6 +353,7 @@ async fn primary_429_falls_over_to_secondary_vertex_leg() {
         ))
         .vertex_native(Some(vertex_native))
         .default_tenant("unattributed")
+        .metrics(metrics)
         .build()
         .unwrap();
     let app = router(Arc::new(gw));
@@ -381,6 +383,20 @@ async fn primary_429_falls_over_to_secondary_vertex_leg() {
     assert_eq!(ok.model, "gemini-2.5-pro");
     assert_eq!(ok.route.as_str(), "conversation");
     assert_eq!(ok.output_tokens, 3);
+
+    let text = scrape(&exporter);
+    [
+        r#"synapse_passthrough_fallback_total{from_model="gemini-3.1-pro-preview",to_model="gemini-2.5-pro"} 1"#,
+        r#"synapse_passthrough_total{action="generateContent",model="gemini-3.1-pro-preview",provider="vertex",status="error"} 1"#,
+        r#"synapse_passthrough_total{action="generateContent",model="gemini-2.5-pro",provider="vertex",status="ok"} 1"#,
+    ]
+    .iter()
+    .for_each(|line| {
+        assert!(
+            text.lines().any(|l| l == *line),
+            "missing `{line}` in:\n{text}"
+        )
+    });
 }
 
 #[tokio::test]

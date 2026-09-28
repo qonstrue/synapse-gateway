@@ -36,7 +36,7 @@ bytes = { workspace = true }
 opentelemetry = "0.32"
 opentelemetry_sdk = "0.32"
 opentelemetry-prometheus = "0.32"
-opentelemetry-otlp = { version = "0.32", features = ["http-proto", "reqwest-client"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "metrics", "reqwest-blocking-client"] }
 prometheus = "0.14"
 
 [dev-dependencies]

@@ -909,7 +909,11 @@ impl GatewayBuilder {
             embed_routes: Arc::new(self.embed_routes.unwrap_or_default()),
             embedders: self.embedders.unwrap_or_default(),
             embed_default_input_per_mtok: self.embed_default_input_per_mtok.unwrap_or(0.10),
-            guard: Arc::new(self.guard.unwrap_or_else(GuardEngine::empty)),
+            guard: Arc::new(
+                self.guard
+                    .unwrap_or_else(GuardEngine::empty)
+                    .with_metrics(metrics.clone()),
+            ),
             ai_task_types: Arc::new(self.ai_task_types.unwrap_or_default()),
             metrics,
         })

@@ -31,17 +31,35 @@ async fn main() -> Result<()> {
     let env: HashMap<String, String> = std::env::vars().collect();
     let config = Config::from_env_map(&env)?;
 
-    // Install the global Prometheus recorder + pull endpoint on the metrics port.
-    // Must run before any `counter!`/`histogram!` emission so metrics are recorded.
+    // Prometheus is served on the metrics port; OTLP/HTTP is pushed as well
+    // when OTEL_EXPORTER_OTLP_ENDPOINT is set.
     let metrics_sockaddr: std::net::SocketAddr = config
         .metrics_addr
         .parse()
         .with_context(|| format!("parsing SYNAPSE_METRICS_ADDR '{}'", config.metrics_addr))?;
-    metrics_exporter_prometheus::PrometheusBuilder::new()
-        .with_http_listener(metrics_sockaddr)
-        .install()
-        .context("installing prometheus exporter")?;
-    tracing::info!(addr = %config.metrics_addr, "synapse-gateway metrics listening");
+    let non_empty = |key: &str| env.get(key).map(|s| s.trim()).filter(|s| !s.is_empty());
+    let otlp_endpoint = non_empty("OTEL_EXPORTER_OTLP_ENDPOINT");
+    let (metrics, exporter) = synapse::telemetry::install(
+        otlp_endpoint,
+        non_empty("OTEL_SERVICE_NAME").unwrap_or("synapse-gateway"),
+    )
+    .context("installing metrics exporters")?;
+    let metrics_listener = tokio::net::TcpListener::bind(metrics_sockaddr)
+        .await
+        .with_context(|| format!("binding SYNAPSE_METRICS_ADDR '{}'", config.metrics_addr))?;
+    tokio::spawn(async move {
+        axum::serve(
+            metrics_listener,
+            synapse::telemetry::metrics_router(exporter),
+        )
+        .await
+        .unwrap_or_else(|e| tracing::error!(error = %e, "metrics server stopped"));
+    });
+    tracing::info!(
+        addr = %config.metrics_addr,
+        otlp = otlp_endpoint.is_some(),
+        "synapse-gateway metrics listening"
+    );
 
     let routes_content = std::fs::read_to_string(&config.routes_path)
         .with_context(|| format!("reading {}", config.routes_path))?;
@@ -177,10 +195,8 @@ async fn main() -> Result<()> {
         embedders.insert(id, embedder);
     }
 
-    let store =
-        synapse::ledger::connect::build_store(&config, synapse::telemetry::GatewayMetrics::noop())
-            .await;
-    let ledger = LedgerHandle::spawn(store, 10_000);
+    let store = synapse::ledger::connect::build_store(&config, metrics.clone()).await;
+    let ledger = LedgerHandle::spawn_with_metrics(store, 10_000, metrics.clone());
 
     let builder = synapse::gateway::Gateway::builder()
         .routes(routes)
@@ -197,7 +213,8 @@ async fn main() -> Result<()> {
         .default_tenant(config.default_tenant.clone())
         .guard(guard)
         .embed_routes(embed_routes)
-        .embed_default_input_per_mtok(config.embed_default_input_per_mtok);
+        .embed_default_input_per_mtok(config.embed_default_input_per_mtok)
+        .metrics(metrics);
     let gateway = embedders
         .into_iter()
         .fold(builder, |b, (id, e)| b.embedder(id, e))

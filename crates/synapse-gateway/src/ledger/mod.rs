@@ -6,9 +6,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
-use metrics::counter;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
+
+use crate::telemetry::GatewayMetrics;
 
 pub mod connect;
 pub mod event;
@@ -75,13 +76,24 @@ impl LedgerStore for NoopLedger {
 #[derive(Clone)]
 pub struct LedgerHandle {
     tx: mpsc::Sender<UsageEntry>,
+    metrics: Arc<GatewayMetrics>,
 }
 
 impl LedgerHandle {
+    /// Spawn the background writer draining into `store`, recording no metrics.
+    pub fn spawn(store: Arc<dyn LedgerStore>, capacity: usize) -> Self {
+        Self::spawn_with_metrics(store, capacity, GatewayMetrics::noop())
+    }
+
     /// Spawn the background writer draining into `store`. `capacity` bounds the
     /// channel; a full channel drops the entry and bumps `ledger_dropped_total`.
-    pub fn spawn(store: Arc<dyn LedgerStore>, capacity: usize) -> Self {
+    pub fn spawn_with_metrics(
+        store: Arc<dyn LedgerStore>,
+        capacity: usize,
+        metrics: Arc<GatewayMetrics>,
+    ) -> Self {
         let (tx, mut rx) = mpsc::channel::<UsageEntry>(capacity);
+        let writer_metrics = metrics.clone();
         tokio::spawn(async move {
             while let Some(entry) = rx.recv().await {
                 if let Err(e) = store.record(&entry).await {
@@ -91,18 +103,18 @@ impl LedgerHandle {
                         request_id = %entry.request_id,
                         "ledger write failed"
                     );
-                    counter!("synapse_ledger_errors_total", "backend" => "writer").increment(1);
+                    writer_metrics.ledger_error("writer");
                 }
             }
             tracing::warn!("ledger background writer stopped");
         });
-        Self { tx }
+        Self { tx, metrics }
     }
 
     /// Non-blocking enqueue. Never awaits the write; drops + counts on full.
     pub fn enqueue(&self, entry: UsageEntry) {
         if self.tx.try_send(entry).is_err() {
-            counter!("synapse_ledger_dropped_total").increment(1);
+            self.metrics.ledger_dropped();
         }
     }
 }
@@ -135,21 +147,31 @@ impl LedgerStore for InMemoryLedger {
 /// `Ok` — the ledger is fire-and-forget; the fan-out owns error reporting.
 pub struct FanoutLedger {
     sinks: Vec<(&'static str, Arc<dyn LedgerStore>)>,
+    metrics: Arc<GatewayMetrics>,
 }
 
 impl FanoutLedger {
     pub fn new(sinks: Vec<(&'static str, Arc<dyn LedgerStore>)>) -> Self {
-        Self { sinks }
+        Self {
+            sinks,
+            metrics: GatewayMetrics::noop(),
+        }
+    }
+
+    /// Count per-sink failures on `metrics`.
+    pub fn with_metrics(self, metrics: Arc<GatewayMetrics>) -> Self {
+        Self { metrics, ..self }
     }
 }
 
 #[async_trait]
 impl LedgerStore for FanoutLedger {
     async fn record(&self, entry: &UsageEntry) -> Result<(), LedgerError> {
+        let metrics = &self.metrics;
         let futs = self.sinks.iter().map(|(label, sink)| async move {
             if let Err(e) = sink.record(entry).await {
                 tracing::warn!(backend = label, error = %e, tenant = %entry.tenant, "ledger sink write failed");
-                counter!("synapse_ledger_errors_total", "backend" => *label).increment(1);
+                metrics.ledger_error(label);
             }
         });
         join_all(futs).await;
@@ -246,5 +268,75 @@ mod tests {
         let r = fanout.record(&entry()).await;
         assert!(r.is_ok());
         assert_eq!(healthy.entries.lock().len(), 1);
+    }
+
+    #[cfg(feature = "server")]
+    async fn scraped_until(exporter: &crate::telemetry::MetricsExporter, line: &str) -> String {
+        for _ in 0..50 {
+            let text = crate::telemetry::scrape(exporter);
+            if text.lines().any(|l| l == line) {
+                return text;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!(
+            "missing `{line}` in:\n{}",
+            crate::telemetry::scrape(exporter)
+        );
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn writer_failures_are_counted_on_the_given_metrics() {
+        let (m, exporter) = crate::telemetry::test_metrics();
+        let handle = LedgerHandle::spawn_with_metrics(Arc::new(FailingLedger), 16, m);
+        handle.enqueue(entry());
+        scraped_until(
+            &exporter,
+            r#"synapse_ledger_errors_total{backend="writer"} 1"#,
+        )
+        .await;
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn full_channel_drops_are_counted_on_the_given_metrics() {
+        struct SlowLedger;
+        #[async_trait]
+        impl LedgerStore for SlowLedger {
+            async fn record(&self, _e: &UsageEntry) -> Result<(), LedgerError> {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                Ok(())
+            }
+        }
+        let (m, exporter) = crate::telemetry::test_metrics();
+        let handle = LedgerHandle::spawn_with_metrics(Arc::new(SlowLedger), 1, m);
+        (0..3).for_each(|_| handle.enqueue(entry()));
+        let dropped: u64 = crate::telemetry::scrape(&exporter)
+            .lines()
+            .find_map(|l| l.strip_prefix("synapse_ledger_dropped_total "))
+            .and_then(|v| v.parse().ok())
+            .unwrap();
+        assert!(dropped >= 1, "expected at least one drop, got {dropped}");
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn fanout_sink_failures_are_counted_per_backend() {
+        let (m, exporter) = crate::telemetry::test_metrics();
+        let fanout = FanoutLedger::new(vec![
+            ("fail", Arc::new(FailingLedger) as Arc<dyn LedgerStore>),
+            (
+                "mem",
+                Arc::new(InMemoryLedger::default()) as Arc<dyn LedgerStore>,
+            ),
+        ])
+        .with_metrics(m);
+        fanout.record(&entry()).await.unwrap();
+        scraped_until(
+            &exporter,
+            r#"synapse_ledger_errors_total{backend="fail"} 1"#,
+        )
+        .await;
     }
 }

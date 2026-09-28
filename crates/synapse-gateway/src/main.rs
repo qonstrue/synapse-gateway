@@ -177,7 +177,9 @@ async fn main() -> Result<()> {
         embedders.insert(id, embedder);
     }
 
-    let store = synapse::ledger::connect::build_store(&config).await;
+    let store =
+        synapse::ledger::connect::build_store(&config, synapse::telemetry::GatewayMetrics::noop())
+            .await;
     let ledger = LedgerHandle::spawn(store, 10_000);
 
     let builder = synapse::gateway::Gateway::builder()

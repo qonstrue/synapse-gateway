@@ -103,12 +103,7 @@ impl Gateway {
             }
         }
 
-        metrics::counter!(
-            "synapse_jev_extraction_total",
-            "route" => req.model.clone(),
-            "degraded" => degraded.to_string(),
-        )
-        .increment(1);
+        self.metrics.jev_extraction(&req.model, degraded);
 
         Ok(HybridOutcome {
             model: jev_completion

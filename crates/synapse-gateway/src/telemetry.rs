@@ -225,15 +225,15 @@ mod exporter {
     use std::sync::Arc;
 
     use axum::extract::State;
-    use axum::http::header;
-    use axum::response::IntoResponse;
+    use axum::http::{header, StatusCode};
+    use axum::response::{IntoResponse, Response};
     use axum::routing::get;
     use axum::Router;
     use opentelemetry::metrics::MeterProvider as _;
     use opentelemetry_otlp::WithExportConfig;
     use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
     use opentelemetry_sdk::Resource;
-    use prometheus::{Registry, TextEncoder};
+    use prometheus::{Registry, TextEncoder, TEXT_FORMAT};
     use tap::Pipe;
 
     use super::GatewayMetrics;
@@ -241,7 +241,7 @@ mod exporter {
     /// The Prometheus registry plus the provider feeding it. Keep it alive for
     /// the process lifetime: dropping the last provider handle shuts every
     /// reader down, and scrapes come back empty.
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub struct MetricsExporter {
         pub registry: Registry,
         _provider: SdkMeterProvider,
@@ -300,9 +300,11 @@ mod exporter {
 
     /// Prometheus text exposition of everything recorded so far.
     pub fn scrape(exporter: &MetricsExporter) -> String {
-        TextEncoder::new()
-            .encode_to_string(&exporter.registry.gather())
-            .unwrap_or_default()
+        encode(exporter).unwrap_or_default()
+    }
+
+    fn encode(exporter: &MetricsExporter) -> prometheus::Result<String> {
+        TextEncoder::new().encode_to_string(&exporter.registry.gather())
     }
 
     /// `GET /metrics` (and `GET /`) in Prometheus text format.
@@ -313,11 +315,14 @@ mod exporter {
             .with_state(exporter)
     }
 
-    async fn serve(State(exporter): State<MetricsExporter>) -> impl IntoResponse {
-        (
-            [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-            scrape(&exporter),
-        )
+    async fn serve(State(exporter): State<MetricsExporter>) -> Response {
+        match encode(&exporter) {
+            Ok(text) => ([(header::CONTENT_TYPE, TEXT_FORMAT)], text).into_response(),
+            Err(e) => {
+                tracing::error!(error = %e, "prometheus metrics encoding failed");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
     }
 }
 
@@ -346,8 +351,17 @@ mod tests {
     fn noop_accepts_every_measurement() {
         let m = GatewayMetrics::noop();
         m.request(&span(), 0.1);
+        m.embedding("embed", "text-embedding-3-small", "openai", 0.05);
+        m.passthrough("vertex", "gemini-2.5-flash", "countTokens", true);
+        m.passthrough_fallback("gemini-2.5-pro", "gemini-2.5-flash");
+        m.jev_extraction("extract", false);
+        m.ledger_error("writer");
         m.ledger_dropped();
+        m.retry_attempt("qwen");
+        m.resilience_call("qwen", "success", 0.3);
         m.breaker_transition("qwen", "open", 1);
+        m.guard_scan("strict", "block", 0.001);
+        m.guard_match("strict", "ban_substrings", "block");
     }
 
     #[cfg(feature = "server")]
@@ -397,6 +411,25 @@ mod tests {
 
     #[cfg(feature = "server")]
     #[test]
+    fn failed_passthrough_and_latest_breaker_state_export() {
+        let (m, exporter) = test_metrics();
+        m.passthrough("vertex", "gemini-2.5-flash", "countTokens", false);
+        m.breaker_transition("qwen", "open", 1);
+        m.breaker_transition("qwen", "half_open", 2);
+        let text = scrape(&exporter);
+        for line in [
+            r#"synapse_passthrough_total{action="countTokens",model="gemini-2.5-flash",provider="vertex",status="error"} 1"#,
+            r#"synapse_resilience_breaker_state{name="qwen"} 2"#,
+        ] {
+            assert!(
+                text.lines().any(|l| l == line),
+                "missing `{line}` in:\n{text}"
+            );
+        }
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
     fn exposition_has_seconds_buckets_and_no_otel_artifacts() {
         let (m, exporter) = test_metrics();
         m.request(&span(), 0.2);
@@ -409,12 +442,73 @@ mod tests {
         assert!(!text.contains("_total_total"));
     }
 
+    /// Accept one OTLP request, answer 200, and return its request line.
+    #[cfg(feature = "server")]
+    fn serve_one_otlp_request(listener: std::net::TcpListener) -> std::io::Result<String> {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let head: Vec<String> = std::iter::from_fn(|| {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(n) if n > 0 && line != "\r\n" => Some(line),
+                _ => None,
+            }
+        })
+        .collect();
+        let body_len = head
+            .iter()
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        reader.read_exact(&mut vec![0; body_len])?;
+        stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")?;
+        Ok(head.into_iter().next().unwrap_or_default())
+    }
+
+    /// Install with a local collector, check Prometheus still scrapes, then
+    /// drop everything so shutdown flushes one OTLP export to the collector.
+    #[cfg(feature = "server")]
+    fn assert_otlp_exports_alongside_prometheus() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || tx.send(serve_one_otlp_request(listener)));
+
+        let (m, exporter) = install(Some(&format!("http://{addr}/")), "synapse-gateway").unwrap();
+        m.ledger_dropped();
+        assert!(scrape(&exporter).contains("synapse_ledger_dropped_total 1"));
+        drop(m);
+        drop(exporter);
+
+        let request_line = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("collector received no OTLP export")
+            .unwrap();
+        assert!(
+            request_line.starts_with("POST /v1/metrics"),
+            "unexpected request line: {request_line}"
+        );
+    }
+
     #[cfg(feature = "server")]
     #[test]
     fn otlp_and_prometheus_readers_coexist() {
-        let (m, exporter) = install(Some("http://127.0.0.1:4318/"), "synapse-gateway").unwrap();
-        m.ledger_dropped();
-        assert!(scrape(&exporter).contains("synapse_ledger_dropped_total 1"));
+        assert_otlp_exports_alongside_prometheus();
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn otlp_exports_when_installed_inside_a_tokio_runtime() {
+        assert_otlp_exports_alongside_prometheus();
     }
 
     #[cfg(feature = "server")]

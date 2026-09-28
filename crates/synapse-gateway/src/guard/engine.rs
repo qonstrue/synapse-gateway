@@ -164,6 +164,7 @@ fn severity_label(s: Severity) -> &'static str {
         Severity::Block => "block",
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumer that lacked that provider's credential — and a consumer running an
   older build crashed on the unrecognised provider id even with the credential
   present.
+- `telemetry` module: `GatewayMetrics` (all gateway instruments, built from any
+  OpenTelemetry `Meter`; `GatewayMetrics::noop()` records nothing),
+  `seconds_histogram` and `SECONDS_BUCKETS`; with the `server` feature,
+  `install` (Prometheus registry plus optional OTLP/HTTP reader),
+  `MetricsExporter` and `metrics_router`. `CircuitBreaker::attach_metrics`
+  records breaker and retry metrics for breakers built outside a `Catalog`.
 
 ### Changed
 
@@ -36,7 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GatewayBuilder::metrics` (default no-op); `LedgerHandle::spawn_with_metrics`,
   `FanoutLedger::with_metrics`, `GuardEngine::with_metrics` and
   `Catalog::attach_metrics` are the opt-ins for code built outside the builder.
-  `ledger::connect::build_store` now takes the metrics as a second argument.
+  `ledger::connect::build_store` now takes the metrics as a second argument,
+  and `GenAiSpan::emit_metrics` takes `(&GatewayMetrics, secs)`.
+- A global `metrics` recorder installed by a host process no longer receives
+  gateway series. In-process consumers must pass `GatewayBuilder::metrics` to
+  keep recording them.
 - Duration metrics (`*_duration_seconds`) are now histograms with second-based
   `_bucket` series instead of summaries; queries on `{quantile=...}` must move
   to `histogram_quantile(...)` over `_bucket`.

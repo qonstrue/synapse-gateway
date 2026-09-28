@@ -212,7 +212,7 @@ Both timeouts apply to the standard lane. The native Vertex lane is currently bo
 |----------|---------|-------------|
 | `SYNAPSE_ADDR` | `0.0.0.0:8080` | Address and port for the main HTTP server. |
 | `SYNAPSE_METRICS_ADDR` | `0.0.0.0:9090` | Address and port for the Prometheus metrics endpoint. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Collector base URL for OTLP/HTTP metric export (`/v1/metrics` is appended). Unset disables OTLP. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Collector base URL for OTLP/HTTP metric export (`/v1/metrics` is appended). Unset disables OTLP. `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is not read. |
 | `OTEL_SERVICE_NAME` | `synapse-gateway` | `service.name` resource attribute on OTLP metrics. |
 | `SYNAPSE_ROUTES_PATH` | `config/routes.toml` | Path to the route configuration file. |
 | `SYNAPSE_PRICING_PATH` | `config/pricing.toml` | Path to the pricing configuration file. |

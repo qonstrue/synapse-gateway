@@ -12,7 +12,7 @@
       }
     ]
   },
-  "description": "Traffic, latency, token usage, resilience (retries/circuit breakers), embeddings, and cost-ledger health for synapse-gateway. All metrics are emitted via metrics-exporter-prometheus on the gateway's :9090 /metrics endpoint and scraped by the synapse-gateway ServiceMonitor.",
+  "description": "Traffic, latency, token usage, resilience (retries/circuit breakers), embeddings, and cost-ledger health for synapse-gateway. All metrics are recorded with OpenTelemetry, served in Prometheus format on the gateway's :9090 /metrics endpoint, and scraped by the synapse-gateway ServiceMonitor.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,

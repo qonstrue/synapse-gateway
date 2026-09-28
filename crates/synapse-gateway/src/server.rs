@@ -152,13 +152,9 @@ async fn gemini_passthrough(
             .passthrough_request(model, action, false, body, None)
             .await?;
         let status = resp.status();
-        metrics::counter!(
-            "synapse_passthrough_total",
-            "model" => model.to_string(),
-            "action" => action.to_string(),
-            "status" => if status.is_success() { "ok" } else { "error" },
-        )
-        .increment(1);
+        st.gateway
+            .metrics
+            .passthrough("vertex", model, action, status.is_success());
         let bytes = resp.bytes().await.map_err(|e| GatewayError::Upstream {
             status: 502,
             body: e.to_string(),
@@ -174,12 +170,7 @@ async fn gemini_passthrough(
 
     for (i, leg) in chain.legs.iter().enumerate() {
         if let Some(from) = prev_model.take() {
-            metrics::counter!(
-                "synapse_passthrough_fallback_total",
-                "from_model" => from,
-                "to_model" => leg.model.clone(),
-            )
-            .increment(1);
+            st.gateway.metrics.passthrough_fallback(&from, &leg.model);
         }
 
         let attempt = provider
@@ -196,13 +187,9 @@ async fn gemini_passthrough(
             Ok(r) => r,
             Err(e) => {
                 meter_passthrough_error(&st.gateway, &ctx, &leg.model, route_alias);
-                metrics::counter!(
-                    "synapse_passthrough_total",
-                    "model" => leg.model.clone(),
-                    "action" => action.to_string(),
-                    "status" => "error",
-                )
-                .increment(1);
+                st.gateway
+                    .metrics
+                    .passthrough("vertex", &leg.model, action, false);
                 if i + 1 < chain.legs.len() {
                     prev_model = Some(leg.model.clone());
                     continue;
@@ -212,13 +199,9 @@ async fn gemini_passthrough(
         };
 
         let status = resp.status();
-        metrics::counter!(
-            "synapse_passthrough_total",
-            "model" => leg.model.clone(),
-            "action" => action.to_string(),
-            "status" => if status.is_success() { "ok" } else { "error" },
-        )
-        .increment(1);
+        st.gateway
+            .metrics
+            .passthrough("vertex", &leg.model, action, status.is_success());
 
         if status.is_success() {
             let mut guard = PassthroughUsageGuard::new(
@@ -332,14 +315,9 @@ async fn jev_passthrough(
     };
 
     let status = resp.status();
-    metrics::counter!(
-        "synapse_passthrough_total",
-        "provider" => "typesafe",
-        "model" => model.clone(),
-        "action" => "systemone",
-        "status" => if status.is_success() { "ok" } else { "error" },
-    )
-    .increment(1);
+    st.gateway
+        .metrics
+        .passthrough("typesafe", &model, "systemone", status.is_success());
 
     if status.is_success() {
         let bytes = resp.bytes().await.map_err(|e| {

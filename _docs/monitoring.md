@@ -20,7 +20,9 @@ It visualises traffic, latency, token usage, resilience (retries / circuit break
 
 ## Metrics it depends on
 
-All are emitted by `metrics-exporter-prometheus` on the gateway's metrics endpoint (`SYNAPSE_METRICS_ADDR`, default `0.0.0.0:9090`, path `/metrics`):
+The gateway records its metrics with OpenTelemetry and serves them in Prometheus text format on its metrics endpoint (`SYNAPSE_METRICS_ADDR`, default `0.0.0.0:9090`, path `/metrics`). Setting `OTEL_EXPORTER_OTLP_ENDPOINT` (a collector base URL such as `http://otel-collector:4318`) also pushes the same series over OTLP/HTTP every 60 seconds, with `service.name` from `OTEL_SERVICE_NAME` (default `synapse-gateway`). Duration metrics are histograms with second-based buckets, so latency panels use `histogram_quantile(...)` over `*_duration_seconds_bucket`. Each metric keeps at most 2000 label combinations; beyond that, new combinations are folded into one series labelled `otel_metric_overflow="true"`.
+
+The full set of metrics is below. The dashboard charts all of them except `synapse_resilience_call_duration_seconds`, the passthrough and Jev extraction counters, and the guardrail metrics.
 
 | Metric | Type | Labels |
 |--------|------|--------|
@@ -36,6 +38,12 @@ All are emitted by `metrics-exporter-prometheus` on the gateway's metrics endpoi
 | `synapse_ledger_dropped_total` | counter | — |
 | `synapse_embeddings_total` | counter | `route`, `model`, `provider` |
 | `synapse_embedding_duration_seconds` | histogram | `route`, `model`, `provider` |
+| `synapse_passthrough_total` | counter | `provider`, `model`, `action`, `status` |
+| `synapse_passthrough_fallback_total` | counter | `from_model`, `to_model` |
+| `synapse_jev_extraction_total` | counter | `route`, `degraded` |
+| `synapse_guard_scans_total` | counter | `policy`, `outcome` |
+| `synapse_guard_matches_total` | counter | `policy`, `scanner`, `severity` |
+| `synapse_guard_scan_duration_seconds` | histogram | `policy` |
 
 Embedding token usage and cost are recorded to the **ledger** (not Prometheus) as `UsageEvent`s with `op = "embedding"` — see [embeddings.md](embeddings.md).
 

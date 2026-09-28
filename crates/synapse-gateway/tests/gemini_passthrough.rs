@@ -18,6 +18,7 @@ use synapse::providers::vertex_auth::VertexAuth;
 use synapse::providers::Catalog;
 use synapse::routing::table::RouteTable;
 use synapse::server::router;
+use synapse::telemetry::{scrape, test_metrics, GatewayMetrics};
 use synapse::vertex_native::VertexNativeProvider;
 use tower::ServiceExt;
 use wiremock::matchers::{body_string_contains, header, method, path};
@@ -37,6 +38,13 @@ fn vertex_auth() -> Arc<VertexAuth> {
 }
 
 async fn passthrough_gateway(mock_uri: &str) -> (Gateway, Arc<InMemoryLedger>) {
+    passthrough_gateway_with(mock_uri, GatewayMetrics::noop()).await
+}
+
+async fn passthrough_gateway_with(
+    mock_uri: &str,
+    metrics: Arc<GatewayMetrics>,
+) -> (Gateway, Arc<InMemoryLedger>) {
     let routes = RouteTable::from_toml_str(
         r#"[routes."fast"]
            legs = [{ provider = "vertex", model = "gemini-2.5-flash" }]"#,
@@ -66,6 +74,7 @@ async fn passthrough_gateway(mock_uri: &str) -> (Gateway, Arc<InMemoryLedger>) {
         ))
         .vertex_native(Some(vertex_native))
         .default_tenant("unattributed")
+        .metrics(metrics)
         .build()
         .unwrap();
     (gw, store)
@@ -333,6 +342,7 @@ async fn primary_429_falls_over_to_secondary_vertex_leg() {
         Some(mock.uri()),
     );
     let store = Arc::new(InMemoryLedger::default());
+    let (metrics, exporter) = test_metrics();
     let gw = Gateway::builder()
         .routes(routes)
         .catalog(catalog)
@@ -343,6 +353,7 @@ async fn primary_429_falls_over_to_secondary_vertex_leg() {
         ))
         .vertex_native(Some(vertex_native))
         .default_tenant("unattributed")
+        .metrics(metrics)
         .build()
         .unwrap();
     let app = router(Arc::new(gw));
@@ -372,6 +383,20 @@ async fn primary_429_falls_over_to_secondary_vertex_leg() {
     assert_eq!(ok.model, "gemini-2.5-pro");
     assert_eq!(ok.route.as_str(), "conversation");
     assert_eq!(ok.output_tokens, 3);
+
+    let text = scrape(&exporter);
+    [
+        r#"synapse_passthrough_fallback_total{from_model="gemini-3.1-pro-preview",to_model="gemini-2.5-pro"} 1"#,
+        r#"synapse_passthrough_total{action="generateContent",model="gemini-3.1-pro-preview",provider="vertex",status="error"} 1"#,
+        r#"synapse_passthrough_total{action="generateContent",model="gemini-2.5-pro",provider="vertex",status="ok"} 1"#,
+    ]
+    .iter()
+    .for_each(|line| {
+        assert!(
+            text.lines().any(|l| l == *line),
+            "missing `{line}` in:\n{text}"
+        )
+    });
 }
 
 #[tokio::test]
@@ -475,4 +500,35 @@ async fn count_tokens_is_forwarded_but_not_metered() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(store.entries.lock().is_empty());
+}
+
+#[tokio::test]
+async fn gemini_passthrough_counts_carry_the_vertex_provider_label() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1/projects/p/locations/global/publishers/google/models/gemini-2.5-flash:countTokens",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"totalTokens": 9})),
+        )
+        .mount(&mock)
+        .await;
+
+    let (metrics, exporter) = test_metrics();
+    let (gw, _store) = passthrough_gateway_with(&mock.uri(), metrics).await;
+    let resp = router(Arc::new(gw))
+        .oneshot(gemini_request(&format!(
+            "/v1beta/models/{MODEL}:countTokens"
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let line = r#"synapse_passthrough_total{action="countTokens",model="gemini-2.5-flash",provider="vertex",status="ok"} 1"#;
+    let text = scrape(&exporter);
+    assert!(
+        text.lines().any(|l| l == line),
+        "missing `{line}` in:\n{text}"
+    );
 }

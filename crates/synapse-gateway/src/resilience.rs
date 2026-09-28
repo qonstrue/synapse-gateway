@@ -3,10 +3,14 @@
 //! Mirrors talos-core `src/resilience.rs` (profiles, breakers, `is_retryable` rules).
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use backon::{ExponentialBuilder, Retryable};
 use parking_lot::Mutex;
+use tap::TapOptional;
+
+use crate::telemetry::GatewayMetrics;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Profile {
@@ -103,7 +107,7 @@ where
     let start = Instant::now();
 
     if breaker.guard().is_err() {
-        record_call_metrics(label, "circuit_open", start.elapsed());
+        record_call_metrics(breaker, label, "circuit_open", start.elapsed());
         return Err(ResilienceError::CircuitOpen {
             name: breaker.name.to_string(),
         });
@@ -125,11 +129,7 @@ where
         .when(&is_retryable)
         .notify(|err, dur| {
             attempt += 1;
-            metrics::counter!(
-                "synapse_resilience_retry_attempts_total",
-                "label" => label,
-            )
-            .increment(1);
+            breaker.emit(|m| m.retry_attempt(label));
             tracing::warn!(
                 label,
                 attempt,
@@ -147,24 +147,18 @@ where
     } else {
         "exhausted"
     };
-    record_call_metrics(label, outcome, start.elapsed());
+    record_call_metrics(breaker, label, outcome, start.elapsed());
 
     result.map_err(ResilienceError::Exhausted)
 }
 
-fn record_call_metrics(label: &'static str, outcome: &'static str, elapsed: Duration) {
-    metrics::counter!(
-        "synapse_resilience_calls_total",
-        "label" => label,
-        "outcome" => outcome,
-    )
-    .increment(1);
-    metrics::histogram!(
-        "synapse_resilience_call_duration_seconds",
-        "label" => label,
-        "outcome" => outcome,
-    )
-    .record(elapsed.as_secs_f64());
+fn record_call_metrics(
+    breaker: &CircuitBreaker,
+    label: &'static str,
+    outcome: &'static str,
+    elapsed: Duration,
+) {
+    breaker.emit(|m| m.resilience_call(label, outcome, elapsed.as_secs_f64()));
 }
 
 pub fn is_retryable_reqwest(e: &reqwest::Error) -> bool {
@@ -186,6 +180,7 @@ pub struct CircuitBreaker {
     pub(crate) consecutive_failures: AtomicU64,
     pub(crate) state: AtomicU8,
     pub(crate) opened_at: Mutex<Option<Instant>>,
+    pub(crate) metrics: OnceLock<Arc<GatewayMetrics>>,
 }
 
 pub(crate) const STATE_CLOSED: u8 = 0;
@@ -202,7 +197,22 @@ impl CircuitBreaker {
             consecutive_failures: AtomicU64::new(0),
             state: AtomicU8::new(STATE_CLOSED),
             opened_at: Mutex::new(None),
+            metrics: OnceLock::new(),
         }
+    }
+
+    /// Record this breaker's calls, retries, and transitions on `metrics`.
+    /// The first attach wins; until then nothing is recorded.
+    pub fn attach_metrics(&self, metrics: Arc<GatewayMetrics>) {
+        let _ = self.metrics.set(metrics);
+    }
+
+    fn emit(&self, f: impl FnOnce(&GatewayMetrics)) {
+        self.metrics.get().tap_some(|m| f(m));
+    }
+
+    fn record_transition(&self, transition: &'static str, new: u8) {
+        self.emit(|m| m.breaker_transition(self.name, transition, new));
     }
 
     pub fn guard(&self) -> Result<(), ResilienceError> {
@@ -213,9 +223,9 @@ impl CircuitBreaker {
                 let opened = opened_at.unwrap_or_else(Instant::now);
                 drop(opened_at);
                 if Instant::now().duration_since(opened) >= self.open_for {
-                    let prev = self.state.swap(STATE_HALF_OPEN, Ordering::AcqRel);
+                    self.state.swap(STATE_HALF_OPEN, Ordering::AcqRel);
                     tracing::info!(name = self.name, "circuit breaker half-open");
-                    record_breaker_transition(self.name, "half_open", prev, STATE_HALF_OPEN);
+                    self.record_transition("half_open", STATE_HALF_OPEN);
                     Ok(())
                 } else {
                     Err(ResilienceError::CircuitOpen {
@@ -234,7 +244,7 @@ impl CircuitBreaker {
                 let prev = self.state.swap(STATE_CLOSED, Ordering::AcqRel);
                 if prev == STATE_HALF_OPEN {
                     tracing::info!(name = self.name, "circuit breaker closed");
-                    record_breaker_transition(self.name, "closed", prev, STATE_CLOSED);
+                    self.record_transition("closed", STATE_CLOSED);
                 }
             }
             Err(_) => {
@@ -248,23 +258,12 @@ impl CircuitBreaker {
                             consecutive_failures = n,
                             "circuit breaker opened",
                         );
-                        record_breaker_transition(self.name, "open", prev, STATE_OPEN);
+                        self.record_transition("open", STATE_OPEN);
                     }
                 }
             }
         }
     }
-}
-
-fn record_breaker_transition(name: &'static str, transition: &'static str, prev: u8, new: u8) {
-    metrics::counter!(
-        "synapse_resilience_breaker_transitions_total",
-        "name" => name,
-        "transition" => transition,
-    )
-    .increment(1);
-    metrics::gauge!("synapse_resilience_breaker_state", "name" => name).set(new as f64);
-    let _ = prev;
 }
 
 #[cfg(test)]
@@ -416,5 +415,58 @@ mod tests {
             Err(ResilienceError::Exhausted(MyErr(false)))
         ));
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn breaker_without_metrics_records_nothing_and_still_opens() {
+        let b = CircuitBreaker::new("quiet", Profile::Default);
+        (0..5).for_each(|_| b.record(&Err::<(), _>(make_fake_reqwest_error())));
+        assert!(matches!(
+            b.guard(),
+            Err(ResilienceError::CircuitOpen { .. })
+        ));
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn attached_metrics_see_calls_retries_and_transitions() {
+        #[derive(Debug)]
+        struct MyErr;
+        let (m, exporter) = crate::telemetry::test_metrics();
+        let breaker = CircuitBreaker::new("metered", Profile::Default);
+        breaker.attach_metrics(m);
+
+        let attempts = AtomicU32::new(0);
+        let result: Result<u32, ResilienceError<MyErr>> = run_with_classifier(
+            || {
+                let n = attempts.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    match n {
+                        0 => Err(MyErr),
+                        _ => Ok(7u32),
+                    }
+                }
+            },
+            Profile::Default,
+            &breaker,
+            "metered",
+            |_: &MyErr| true,
+        )
+        .await;
+        assert_eq!(result.unwrap(), 7);
+        (0..5).for_each(|_| breaker.record(&Err::<(), _>(make_fake_reqwest_error())));
+
+        let text = crate::telemetry::scrape(&exporter);
+        for line in [
+            r#"synapse_resilience_retry_attempts_total{label="metered"} 1"#,
+            r#"synapse_resilience_calls_total{label="metered",outcome="success"} 1"#,
+            r#"synapse_resilience_breaker_transitions_total{name="metered",transition="open"} 1"#,
+            r#"synapse_resilience_breaker_state{name="metered"} 1"#,
+        ] {
+            assert!(
+                text.lines().any(|l| l == line),
+                "missing `{line}` in:\n{text}"
+            );
+        }
     }
 }

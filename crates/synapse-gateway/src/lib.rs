@@ -15,5 +15,6 @@ pub mod resilience;
 pub mod routing;
 #[cfg(feature = "server")]
 pub mod server;
+pub mod telemetry;
 pub mod vertex_endpoint;
 pub mod vertex_native;

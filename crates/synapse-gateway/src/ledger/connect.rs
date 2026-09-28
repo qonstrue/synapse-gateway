@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::config::{Config, LedgerBackend};
 use crate::ledger::{FanoutLedger, LedgerError, LedgerStore, NoopLedger};
+use crate::telemetry::GatewayMetrics;
 
 async fn try_connect_backend(
     backend: LedgerBackend,
@@ -140,7 +141,8 @@ async fn try_connect_backend(
 
 /// Connect every configured ledger backend. Failures are logged per sink; the
 /// gateway still starts. Returns a no-op store when nothing connects.
-pub async fn build_store(config: &Config) -> Arc<dyn LedgerStore> {
+/// Fan-out sink failures are counted on `metrics`.
+pub async fn build_store(config: &Config, metrics: Arc<GatewayMetrics>) -> Arc<dyn LedgerStore> {
     let mut sinks: Vec<(&'static str, Arc<dyn LedgerStore>)> = Vec::new();
     for &backend in &config.ledger_backends {
         if let Some(sink) = try_connect_backend(backend, config).await {
@@ -154,7 +156,7 @@ pub async fn build_store(config: &Config) -> Arc<dyn LedgerStore> {
     if sinks.len() == 1 {
         return sinks.into_iter().next().expect("one sink").1;
     }
-    Arc::new(FanoutLedger::new(sinks))
+    Arc::new(FanoutLedger::new(sinks).with_metrics(metrics))
 }
 
 #[cfg(test)]
@@ -185,7 +187,7 @@ mod tests {
             )]),
             provider_validation: crate::config::ProviderValidation::Strict,
         };
-        let store = build_store(&config).await;
+        let store = build_store(&config, GatewayMetrics::noop()).await;
         // NoopLedger: record always succeeds without persisting.
         store
             .record(&crate::ledger::UsageEntry {
@@ -231,7 +233,7 @@ mod tests {
             env: HashMap::from([("SYNAPSE_LEDGER_SQLITE_DSN".into(), "sqlite::memory:".into())]),
             provider_validation: crate::config::ProviderValidation::Strict,
         };
-        let store = build_store(&config).await;
+        let store = build_store(&config, GatewayMetrics::noop()).await;
         let entry = crate::ledger::UsageEntry {
             ts: chrono::Utc::now(),
             tenant: "t".into(),

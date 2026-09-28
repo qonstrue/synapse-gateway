@@ -2,6 +2,7 @@
 //! runs a request's input text through the route's selected policy.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use llm_guard::{Pipeline, PipelineMode, ScanResult, Severity};
@@ -9,6 +10,7 @@ use serde_json::Value;
 
 use crate::error::GatewayError;
 use crate::routing::request::{ChatRequest, Message};
+use crate::telemetry::GatewayMetrics;
 
 use super::policy::{GuardrailsConfig, PolicyMode};
 use super::scanners::{build_scanners, BoxedScanner};
@@ -23,6 +25,7 @@ struct CompiledPolicy {
 #[derive(Default)]
 pub struct GuardEngine {
     policies: HashMap<String, CompiledPolicy>,
+    metrics: Arc<GatewayMetrics>,
 }
 
 impl GuardEngine {
@@ -50,7 +53,15 @@ impl GuardEngine {
                 },
             );
         }
-        Ok(Self { policies })
+        Ok(Self {
+            policies,
+            ..Self::default()
+        })
+    }
+
+    /// Record scans and matches on `metrics`.
+    pub fn with_metrics(self, metrics: Arc<GatewayMetrics>) -> Self {
+        Self { metrics, ..self }
     }
 
     /// Scan `req`'s input under `policy_name`. Returns `Ok(())` when the
@@ -65,7 +76,7 @@ impl GuardEngine {
         let started = Instant::now();
         let result = policy.pipeline.scan(&text);
         let outcome = outcome_label(&result, policy.mode);
-        record_metrics(policy_name, &result, outcome, started);
+        self.record_metrics(policy_name, &result, outcome, started);
 
         if result.should_refuse() && policy.mode == PolicyMode::Block {
             return Err(GatewayError::ContentBlocked {
@@ -74,6 +85,21 @@ impl GuardEngine {
             });
         }
         Ok(())
+    }
+
+    fn record_metrics(
+        &self,
+        policy: &str,
+        result: &ScanResult,
+        outcome: &'static str,
+        started: Instant,
+    ) {
+        self.metrics
+            .guard_scan(policy, outcome, started.elapsed().as_secs_f64());
+        result.matches.iter().for_each(|m| {
+            self.metrics
+                .guard_match(policy, m.scanner, severity_label(m.severity))
+        });
     }
 }
 
@@ -137,29 +163,6 @@ fn severity_label(s: Severity) -> &'static str {
         Severity::Warn => "warn",
         Severity::Block => "block",
     }
-}
-
-fn record_metrics(policy: &str, result: &ScanResult, outcome: &'static str, started: Instant) {
-    metrics::counter!(
-        "synapse_guard_scans_total",
-        "policy" => policy.to_string(),
-        "outcome" => outcome,
-    )
-    .increment(1);
-    for m in &result.matches {
-        metrics::counter!(
-            "synapse_guard_matches_total",
-            "policy" => policy.to_string(),
-            "scanner" => m.scanner,
-            "severity" => severity_label(m.severity),
-        )
-        .increment(1);
-    }
-    metrics::histogram!(
-        "synapse_guard_scan_duration_seconds",
-        "policy" => policy.to_string(),
-    )
-    .record(started.elapsed().as_secs_f64());
 }
 
 #[cfg(test)]
@@ -231,5 +234,24 @@ mod tests {
             e.guard("strict", &r).unwrap_err(),
             GatewayError::ContentBlocked { .. }
         ));
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn scans_and_matches_are_recorded_on_attached_metrics() {
+        let (m, exporter) = crate::telemetry::test_metrics();
+        let e = engine(BLOCKING).with_metrics(m);
+        assert!(e.guard("strict", &req("this is forbidden")).is_err());
+        let text = crate::telemetry::scrape(&exporter);
+        for line in [
+            r#"synapse_guard_scans_total{outcome="block",policy="strict"} 1"#,
+            r#"synapse_guard_matches_total{policy="strict",scanner="ban_substrings",severity="block"} 1"#,
+            r#"synapse_guard_scan_duration_seconds_count{policy="strict"} 1"#,
+        ] {
+            assert!(
+                text.lines().any(|l| l == line),
+                "missing `{line}` in:\n{text}"
+            );
+        }
     }
 }

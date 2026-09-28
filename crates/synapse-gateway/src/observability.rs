@@ -1,10 +1,9 @@
-//! OpenLLMetry `gen_ai.*` span attributes + Prometheus metric emission.
+//! OpenLLMetry `gen_ai.*` span attributes; metrics are recorded through [`GatewayMetrics`].
 //! Both lanes emit the same shape so native-Vertex calls are not blind.
-
-use metrics::{counter, histogram, Label};
 
 use crate::routing::classify::Lane;
 use crate::routing::executor::Completion;
+use crate::telemetry::GatewayMetrics;
 
 /// Attributes describing one served request, used to build a tracing span and
 /// to emit metrics. `provider`/`model` reflect the leg that actually served.
@@ -58,24 +57,10 @@ impl GenAiSpan {
         }
     }
 
-    /// Emit Prometheus counters/histograms. Span emission (tracing) is wired in
+    /// Record this request on `metrics`. Span emission (tracing) is wired in
     /// the server handler via `tracing::info_span!` using these same fields.
-    pub fn emit_metrics(&self, latency_secs: f64) {
-        let lane = match self.lane {
-            Lane::Standard => "standard",
-            Lane::NativeVertex => "native",
-            Lane::Jev => "jev",
-        };
-        let labels: Vec<Label> = vec![
-            Label::new("route", self.route.clone()),
-            Label::new("model", self.response_model.clone()),
-            Label::new("system", self.system),
-            Label::new("lane", lane),
-        ];
-        counter!("synapse_requests_total", labels.clone()).increment(1);
-        histogram!("synapse_request_duration_seconds", labels.clone()).record(latency_secs);
-        counter!("synapse_input_tokens_total", labels.clone()).increment(self.input_tokens);
-        counter!("synapse_output_tokens_total", labels).increment(self.output_tokens);
+    pub fn emit_metrics(&self, metrics: &GatewayMetrics, latency_secs: f64) {
+        metrics.request(self, latency_secs);
     }
 }
 

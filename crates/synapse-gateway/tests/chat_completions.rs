@@ -491,3 +491,104 @@ async fn http_streaming_returns_sse_chunks() {
     assert!(text.contains("streamed"), "body: {text}");
     assert!(text.contains("[DONE]"), "body: {text}");
 }
+
+#[tokio::test]
+async fn buffered_and_streamed_requests_record_on_the_configured_metrics() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use std::sync::Arc;
+    use synapse::ledger::{InMemoryLedger, LedgerHandle, LedgerStore};
+    use synapse::pricing::PricingTable;
+    use synapse::routing::table::RouteTable;
+    use synapse::server::router;
+    use synapse::telemetry::{scrape, test_metrics};
+    use tower::ServiceExt;
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_ok("hi there")),
+        )
+        .mount(&mock)
+        .await;
+
+    let routes = RouteTable::from_toml_str(
+        r#"[routes."fast"]
+           legs = [{ provider = "qwen", model = "qwen-max" }]"#,
+    )
+    .unwrap();
+    let catalog = Catalog::build(
+        &std::collections::HashMap::from([
+            ("DASHSCOPE_API_KEY".to_string(), "sk".to_string()),
+            (
+                "DASHSCOPE_BASE_URL".to_string(),
+                format!("{}/v1", mock.uri()),
+            ),
+        ]),
+        &routes.referenced_providers(),
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    let (metrics, exporter) = test_metrics();
+    let gateway = synapse::gateway::Gateway::builder()
+        .routes(routes)
+        .catalog(catalog)
+        .pricing(PricingTable::default())
+        .ledger(LedgerHandle::spawn(
+            Arc::new(InMemoryLedger::default()) as Arc<dyn LedgerStore>,
+            16,
+        ))
+        .metrics(metrics)
+        .build()
+        .unwrap();
+    let app = router(Arc::new(gateway));
+    let labels = r#"{lane="standard",model="qwen-max",route="fast",system="dashscope"}"#;
+
+    for (body, requests) in [
+        (
+            r#"{"model":"fast","messages":[{"role":"user","content":"hi"}]}"#,
+            1,
+        ),
+        (
+            r#"{"model":"fast","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+            2,
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        resp.into_body().collect().await.unwrap();
+        let line = format!("synapse_requests_total{labels} {requests}");
+        let text = scrape(&exporter);
+        assert!(
+            text.lines().any(|l| l == line),
+            "missing `{line}` in:\n{text}"
+        );
+    }
+
+    let text = scrape(&exporter);
+    for line in [
+        format!("synapse_input_tokens_total{labels} 6"),
+        format!("synapse_output_tokens_total{labels} 10"),
+        format!("synapse_request_duration_seconds_count{labels} 2"),
+    ] {
+        assert!(
+            text.lines().any(|l| l == line),
+            "missing `{line}` in:\n{text}"
+        );
+    }
+}

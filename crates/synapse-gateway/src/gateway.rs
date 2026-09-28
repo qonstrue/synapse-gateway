@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use futures::stream::{BoxStream, Stream};
+use tap::Tap;
 use uuid::Uuid;
 
 use crate::error::{GatewayError, LegFailure};
@@ -24,6 +25,7 @@ use crate::routing::executor::{
 use crate::routing::request::ChatRequest;
 use crate::routing::stream::{Accumulator, FinishReason, StreamItem};
 use crate::routing::table::{ChainLeg, RouteTable};
+use crate::telemetry::GatewayMetrics;
 use crate::vertex_native::VertexNativeProvider;
 
 /// Embeddable gateway handle. Construct with [`Gateway::builder`].
@@ -43,6 +45,7 @@ pub struct Gateway {
     pub(crate) embed_default_input_per_mtok: f64,
     pub(crate) guard: Arc<GuardEngine>,
     pub(crate) ai_task_types: Arc<crate::ai_task_type::AiTaskTypeTable>,
+    pub(crate) metrics: Arc<GatewayMetrics>,
 }
 
 /// Per-call identity for an in-process request (replaces HTTP headers).
@@ -169,6 +172,7 @@ pub struct GatewayBuilder {
     embed_default_input_per_mtok: Option<f64>,
     guard: Option<GuardEngine>,
     ai_task_types: Option<crate::ai_task_type::AiTaskTypeTable>,
+    metrics: Option<Arc<GatewayMetrics>>,
 }
 
 impl Gateway {
@@ -272,7 +276,7 @@ impl Gateway {
             legs,
             false,
         )
-        .emit_metrics(started.elapsed().as_secs_f64());
+        .emit_metrics(&self.metrics, started.elapsed().as_secs_f64());
     }
 
     /// Resolve the native Vertex committed stream (shared by chat/chat_stream).
@@ -545,6 +549,7 @@ impl Gateway {
         let guard = StreamSideEffects::new(
             self.ledger.clone(),
             self.pricing.clone(),
+            self.metrics.clone(),
             req.model.clone(),
             self.tenant_of(ctx).to_string(),
             self.attribution_of(ctx, &req.model),
@@ -700,20 +705,12 @@ impl Gateway {
                 .await
             {
                 Ok(out) => {
-                    metrics::counter!(
-                        "synapse_embeddings_total",
-                        "route" => alias.clone(),
-                        "model" => leg.model.clone(),
-                        "provider" => leg.provider.clone(),
-                    )
-                    .increment(1);
-                    metrics::histogram!(
-                        "synapse_embedding_duration_seconds",
-                        "route" => alias.clone(),
-                        "model" => leg.model.clone(),
-                        "provider" => leg.provider.clone(),
-                    )
-                    .record(started.elapsed().as_secs_f64());
+                    self.metrics.embedding(
+                        &alias,
+                        &leg.model,
+                        &leg.provider,
+                        started.elapsed().as_secs_f64(),
+                    );
                     self.record_embed_usage(&ctx, &alias, leg, out.input_tokens);
                     return Ok(crate::embeddings::build_response(alias, out));
                 }
@@ -880,8 +877,15 @@ impl GatewayBuilder {
         self.ai_task_types = Some(t);
         self
     }
+    /// Where every gateway metric is recorded. Defaults to a no-op. The guard
+    /// engine always records here, whatever was attached to it before.
+    pub fn metrics(mut self, metrics: Arc<GatewayMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
 
     pub fn build(self) -> anyhow::Result<Gateway> {
+        let metrics = self.metrics.unwrap_or_else(GatewayMetrics::noop);
         Ok(Gateway {
             routes: Arc::new(
                 self.routes
@@ -889,7 +893,8 @@ impl GatewayBuilder {
             ),
             catalog: Arc::new(
                 self.catalog
-                    .ok_or_else(|| anyhow::anyhow!("Gateway: catalog required"))?,
+                    .ok_or_else(|| anyhow::anyhow!("Gateway: catalog required"))?
+                    .tap(|c| c.attach_metrics(&metrics)),
             ),
             pricing: Arc::new(
                 self.pricing
@@ -905,8 +910,13 @@ impl GatewayBuilder {
             embed_routes: Arc::new(self.embed_routes.unwrap_or_default()),
             embedders: self.embedders.unwrap_or_default(),
             embed_default_input_per_mtok: self.embed_default_input_per_mtok.unwrap_or(0.10),
-            guard: Arc::new(self.guard.unwrap_or_else(GuardEngine::empty)),
+            guard: Arc::new(
+                self.guard
+                    .unwrap_or_else(GuardEngine::empty)
+                    .with_metrics(metrics.clone()),
+            ),
             ai_task_types: Arc::new(self.ai_task_types.unwrap_or_default()),
+            metrics,
         })
     }
 }
@@ -918,6 +928,7 @@ impl GatewayBuilder {
 pub(crate) struct StreamSideEffects {
     ledger: LedgerHandle,
     pricing: Arc<PricingTable>,
+    metrics: Arc<GatewayMetrics>,
     route: String,
     tenant: String,
     attribution: Attribution,
@@ -938,6 +949,7 @@ impl StreamSideEffects {
     pub(crate) fn new(
         ledger: LedgerHandle,
         pricing: Arc<PricingTable>,
+        metrics: Arc<GatewayMetrics>,
         route: String,
         tenant: String,
         attribution: Attribution,
@@ -951,6 +963,7 @@ impl StreamSideEffects {
         Self {
             ledger,
             pricing,
+            metrics,
             route,
             tenant,
             attribution,
@@ -1046,7 +1059,7 @@ impl Drop for StreamSideEffects {
             self.legs_attempted,
             true,
         )
-        .emit_metrics(self.started.elapsed().as_secs_f64());
+        .emit_metrics(&self.metrics, self.started.elapsed().as_secs_f64());
     }
 }
 
@@ -1178,6 +1191,7 @@ mod tests {
             let mut guard = StreamSideEffects::new(
                 ledger.clone(),
                 pricing,
+                GatewayMetrics::noop(),
                 "route".into(),
                 "tenant".into(),
                 Attribution::default(),
@@ -1220,6 +1234,7 @@ mod tests {
         let guard = StreamSideEffects::new(
             ledger,
             Arc::new(PricingTable::default()),
+            GatewayMetrics::noop(),
             "route".into(),
             "acme".into(),
             Attribution::default(),

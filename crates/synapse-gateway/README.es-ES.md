@@ -182,6 +182,8 @@ Ambos tiempos de espera se aplican al carril estándar. El carril Vertex nativo 
 |----------|-------------------|-------------|
 | `SYNAPSE_ADDR` | `0.0.0.0:8080` | Dirección y puerto del servidor HTTP principal. |
 | `SYNAPSE_METRICS_ADDR` | `0.0.0.0:9090` | Dirección y puerto del endpoint de métricas de Prometheus. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | URL base del colector para exportar métricas por OTLP/HTTP (se añade `/v1/metrics`). Sin definir, OTLP queda desactivado. `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` no se lee. |
+| `OTEL_SERVICE_NAME` | `synapse-gateway` | Atributo de recurso `service.name` en las métricas OTLP. |
 | `SYNAPSE_ROUTES_PATH` | `config/routes.toml` | Ruta al fichero de configuración de rutas. |
 | `SYNAPSE_PRICING_PATH` | `config/pricing.toml` | Ruta al fichero de configuración de precios. |
 | `SYNAPSE_LEDGER_BACKENDS` | `sqlite` | Lista separada por comas de los destinos activos del registro de costes (p. ej. `postgres,pubsub`). Cada evento se distribuye a todos los destinos listados. |
@@ -284,7 +286,23 @@ La ruta se define con `SYNAPSE_AI_TASK_TYPES_PATH` (por defecto `config/ai_task_
 
 ### Prometheus
 
-Las métricas se sirven en `SYNAPSE_METRICS_ADDR` (por defecto `:9090`).
+Las métricas se registran con OpenTelemetry y se sirven en formato de texto de
+Prometheus en `GET /metrics` sobre `SYNAPSE_METRICS_ADDR` (por defecto `:9090`).
+Define `OTEL_EXPORTER_OTLP_ENDPOINT` con la URL base de un colector (p. ej.
+`http://otel-collector:4318`) para enviarlas también por OTLP/HTTP cada 60
+segundos (configurable con `OTEL_METRIC_EXPORT_INTERVAL`, en milisegundos),
+etiquetadas con `service.name` desde `OTEL_SERVICE_NAME` (por defecto
+`synapse-gateway`). Los nombres de series y etiquetas son los mismos en ambas
+vías. Las métricas de duración son histogramas con buckets en segundos
+(`_bucket`, `_sum`, `_count`). Cada métrica conserva como máximo 2000
+combinaciones de etiquetas; las nuevas combinaciones a partir de ese límite se
+agrupan en una única serie con `otel_metric_overflow="true"`.
+
+Quien embeba el crate con `Gateway::builder()` no registra nada por defecto (las
+métricas son no-op); pasa `.metrics(Arc<GatewayMetrics>)` para registrarlas.
+Constrúyelo con `GatewayMetrics::new(&meter)` desde tu propio `MeterProvider`,
+o, con la feature `server`, desde `synapse::telemetry::install`, manteniendo
+vivo el `MetricsExporter` devuelto durante toda la vida del proceso.
 
 | Métrica | Tipo | Etiquetas | Descripción |
 |---------|------|-----------|-------------|
@@ -294,13 +312,26 @@ Las métricas se sirven en `SYNAPSE_METRICS_ADDR` (por defecto `:9090`).
 | `synapse_output_tokens_total` | Counter | `route`, `model`, `system`, `lane` | Tokens de salida generados acumulados. |
 | `synapse_ledger_dropped_total` | Counter | — | Eventos del registro descartados por canal lleno (desbordamiento fire-and-forget). |
 | `synapse_ledger_errors_total` | Counter | `backend` | Fallos de escritura por destino (p. ej. `backend="pubsub"`). Un fallo en un destino no detiene los demás. |
+| `synapse_embeddings_total` | Counter | `route`, `model`, `provider` | Peticiones de embeddings atendidas. |
+| `synapse_embedding_duration_seconds` | Histogram | `route`, `model`, `provider` | Latencia de embeddings. |
+| `synapse_passthrough_total` | Counter | `provider`, `model`, `action`, `status` | Llamadas passthrough de Gemini (`provider="vertex"`) y Jev (`provider="typesafe"`). |
+| `synapse_passthrough_fallback_total` | Counter | `from_model`, `to_model` | Saltos del passthrough de Gemini al siguiente tramo de Vertex. |
+| `synapse_jev_extraction_total` | Counter | `route`, `degraded` | Respuestas de extracción híbrida de Jev. |
+| `synapse_resilience_calls_total` | Counter | `label`, `outcome` | Llamadas salientes a proveedores por resultado (`success`, `exhausted`, `circuit_open`). |
+| `synapse_resilience_call_duration_seconds` | Histogram | `label`, `outcome` | Latencia de llamadas salientes, reintentos incluidos. |
+| `synapse_resilience_retry_attempts_total` | Counter | `label` | Reintentos de llamadas salientes. |
+| `synapse_resilience_breaker_transitions_total` | Counter | `name`, `transition` | Transiciones de los circuit breakers. |
+| `synapse_resilience_breaker_state` | Gauge | `name` | Estado del breaker: 0 cerrado, 1 abierto, 2 semiabierto. |
+| `synapse_guard_scans_total` | Counter | `policy`, `outcome` | Escaneos de guardrails por resultado. |
+| `synapse_guard_matches_total` | Counter | `policy`, `scanner`, `severity` | Coincidencias de los escáneres de guardrails. |
+| `synapse_guard_scan_duration_seconds` | Histogram | `policy` | Latencia de los escaneos de guardrails. |
 
 Las cuatro métricas `synapse_*` de tokens/peticiones comparten el mismo conjunto de etiquetas:
 
 - **`route`** — el alias de modelo de cara al cliente (p. ej. `gemini-pro`, `fast`).
 - **`model`** — el modelo que realmente atendió la petición (según lo devuelto por el tramo de backend).
 - **`system`** — el valor OpenLLMetry `gen_ai.system`: `vertexai`, `openai`, `dashscope` o `oai_compat`.
-- **`lane`** — `standard` (crate genai) o `native` (REST de Vertex directo).
+- **`lane`** — `standard` (crate genai), `native` (REST de Vertex directo) o `jev` (TypeSafe System One).
 
 El tenant y el workspace **no** son etiquetas de Prometheus. Se registran en el registro de costes (tabla `usage_events`) y se incluyen como atributos en los spans de trazado `gen_ai.*`. Mantenerlos fuera de las etiquetas de métricas evita una cardinalidad no acotada derivada de valores de encabezados suministrados por clientes no confiables.
 

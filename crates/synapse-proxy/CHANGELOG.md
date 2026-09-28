@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+
+- Fix OTLP metric export: `PeriodicReader` exports on its own thread with no tokio runtime, so the async reqwest client panicked ("no reactor running") on every export. `opentelemetry-otlp` now uses the blocking reqwest client (`default-features = false`, features `http-proto`, `metrics`, `reqwest-blocking-client`).
 
 ## 0.2.21
 

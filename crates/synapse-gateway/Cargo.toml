@@ -50,6 +50,11 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"], optional = true }
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", optional = true }
+opentelemetry-prometheus = { version = "0.32", optional = true }
+opentelemetry-otlp = { version = "0.32", features = ["http-proto", "reqwest-client"], optional = true }
+prometheus = { version = "0.14", optional = true }
 anyhow = { workspace = true }
 thiserror = "1"
 synapse-a2a = { workspace = true, optional = true }
@@ -62,7 +67,7 @@ reqwest = { workspace = true }
 
 [features]
 default = ["server", "ledger-sqlite"]
-server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:metrics-exporter-prometheus", "dep:synapse-a2a"]
+server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:metrics-exporter-prometheus", "dep:synapse-a2a", "dep:opentelemetry_sdk", "dep:opentelemetry-prometheus", "dep:opentelemetry-otlp", "dep:prometheus"]
 ledger-sqlite = ["dep:sqlx", "sqlx/sqlite"]
 ledger-postgres = ["dep:sqlx", "sqlx/postgres"]
 ledger-pubsub = ["dep:google-cloud-pubsub", "dep:google-cloud-googleapis"]

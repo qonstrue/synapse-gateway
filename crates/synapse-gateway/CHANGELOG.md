@@ -26,6 +26,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   older build crashed on the unrecognised provider id even with the credential
   present.
 
+### Changed
+
+- Metrics are recorded with OpenTelemetry (opentelemetry-rust 0.32) instead of
+  the `metrics` crate. Prometheus output on `SYNAPSE_METRICS_ADDR` keeps the
+  same series names and labels; setting `OTEL_EXPORTER_OTLP_ENDPOINT` also
+  pushes them over OTLP/HTTP (every 60 seconds by default, tagged with
+  `service.name` from `OTEL_SERVICE_NAME`). Embedders pass
+  `GatewayBuilder::metrics` (default no-op); `LedgerHandle::spawn_with_metrics`,
+  `FanoutLedger::with_metrics`, `GuardEngine::with_metrics` and
+  `Catalog::attach_metrics` are the opt-ins for code built outside the builder.
+  `ledger::connect::build_store` now takes the metrics as a second argument.
+- Duration metrics (`*_duration_seconds`) are now histograms with second-based
+  `_bucket` series instead of summaries; queries on `{quantile=...}` must move
+  to `histogram_quantile(...)` over `_bucket`.
+- Each metric is capped at 2000 label combinations (OpenTelemetry SDK default);
+  overflow is folded into an `otel_metric_overflow="true"` series.
+- `synapse_passthrough_total` from the Gemini passthrough now carries
+  `provider="vertex"`, matching the Jev passthrough's label set.
+
+### Fixed
+
+- synapse-proxy: OTLP metric export used the async reqwest client on the
+  `PeriodicReader` thread, which has no tokio runtime, so every export panicked.
+  It now uses the blocking client.
+
 ## [0.5.36] - 2026-09-23
 
 ### Fixed

@@ -212,6 +212,8 @@ Both timeouts apply to the standard lane. The native Vertex lane is currently bo
 |----------|---------|-------------|
 | `SYNAPSE_ADDR` | `0.0.0.0:8080` | Address and port for the main HTTP server. |
 | `SYNAPSE_METRICS_ADDR` | `0.0.0.0:9090` | Address and port for the Prometheus metrics endpoint. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Collector base URL for OTLP/HTTP metric export (`/v1/metrics` is appended). Unset disables OTLP. |
+| `OTEL_SERVICE_NAME` | `synapse-gateway` | `service.name` resource attribute on OTLP metrics. |
 | `SYNAPSE_ROUTES_PATH` | `config/routes.toml` | Path to the route configuration file. |
 | `SYNAPSE_PRICING_PATH` | `config/pricing.toml` | Path to the pricing configuration file. |
 | `SYNAPSE_GUARDRAILS_PATH` | `config/guardrails.toml` | Path to the guardrails policy file. Absent file = guardrails off. |
@@ -431,7 +433,20 @@ The path is set by `SYNAPSE_AI_TASK_TYPES_PATH` (default `config/ai_task_types.t
 
 ### Prometheus
 
-Metrics are served at `SYNAPSE_METRICS_ADDR` (default `:9090`).
+Metrics are recorded with OpenTelemetry and served in Prometheus text format at
+`GET /metrics` on `SYNAPSE_METRICS_ADDR` (default `:9090`). Set
+`OTEL_EXPORTER_OTLP_ENDPOINT` to a collector base URL (for example
+`http://otel-collector:4318`) to also push them over OTLP/HTTP every 60 seconds
+(override with `OTEL_METRIC_EXPORT_INTERVAL`, in milliseconds), tagged with
+`service.name` from `OTEL_SERVICE_NAME` (default `synapse-gateway`). Series
+names and labels are the same on both paths. Duration metrics are histograms
+with second-based buckets (`_bucket`, `_sum`, `_count`). Each metric keeps at
+most 2000 label combinations; beyond that, new combinations are folded into one
+series labelled `otel_metric_overflow="true"`.
+
+Embedders using `Gateway::builder()` record nothing by default (metrics are a
+no-op); pass `.metrics(Arc<GatewayMetrics>)` to record them, for example from
+`synapse::telemetry::install`.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
@@ -441,13 +456,25 @@ Metrics are served at `SYNAPSE_METRICS_ADDR` (default `:9090`).
 | `synapse_output_tokens_total` | Counter | `route`, `model`, `system`, `lane` | Cumulative output tokens generated. |
 | `synapse_ledger_dropped_total` | Counter | — | Ledger events dropped due to a full channel (fire-and-forget overflow). |
 | `synapse_ledger_errors_total` | Counter | `backend` | Per-sink write failures (e.g. `backend="pubsub"`). One sink failing does not stop the others. |
+| `synapse_embeddings_total` | Counter | `route`, `model`, `provider` | Embedding requests served. |
+| `synapse_embedding_duration_seconds` | Histogram | `route`, `model`, `provider` | Embedding latency. |
+| `synapse_passthrough_total` | Counter | `provider`, `model`, `action`, `status` | Gemini (`provider="vertex"`) and Jev (`provider="typesafe"`) passthrough calls. |
+| `synapse_passthrough_fallback_total` | Counter | `from_model`, `to_model` | Gemini passthrough hops to the next Vertex leg. |
+| `synapse_jev_extraction_total` | Counter | `route`, `degraded` | Jev hybrid extraction responses. |
+| `synapse_resilience_calls_total` | Counter | `label`, `outcome` | Outbound provider calls by outcome (`success`, `exhausted`, `circuit_open`). |
+| `synapse_resilience_call_duration_seconds` | Histogram | `label`, `outcome` | Outbound call latency including retries. |
+| `synapse_resilience_retry_attempts_total` | Counter | `label` | Retries of outbound calls. |
+| `synapse_resilience_breaker_transitions_total` | Counter | `name`, `transition` | Circuit breaker transitions. |
+| `synapse_resilience_breaker_state` | Gauge | `name` | Breaker state: 0 closed, 1 open, 2 half-open. |
+
+The guardrail metrics (`synapse_guard_scans_total`, `synapse_guard_matches_total`, `synapse_guard_scan_duration_seconds`) are listed under [Guardrail metrics](#guardrail-metrics).
 
 All four `synapse_*` token/request metrics share the same label set:
 
 - **`route`** — the client-facing model alias (e.g. `gemini-pro`, `fast`).
 - **`model`** — the model that actually served the request (as returned by the backend leg).
 - **`system`** — the OpenLLMetry `gen_ai.system` value: `vertexai`, `openai`, `dashscope`, or `oai_compat`.
-- **`lane`** — `standard` (genai crate) or `native` (direct Vertex REST).
+- **`lane`** — `standard` (genai crate), `native` (direct Vertex REST), or `jev` (TypeSafe System One).
 
 Tenant and workspace are **not** Prometheus labels. They are recorded in the cost ledger (`usage_events` table) and carried as attributes on `gen_ai.*` tracing spans. Keeping them out of metric labels avoids unbounded cardinality from untrusted client-supplied header values.
 

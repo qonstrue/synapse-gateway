@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use futures::stream::{BoxStream, Stream};
+use tap::Tap;
 use uuid::Uuid;
 
 use crate::error::{GatewayError, LegFailure};
@@ -891,7 +892,8 @@ impl GatewayBuilder {
             ),
             catalog: Arc::new(
                 self.catalog
-                    .ok_or_else(|| anyhow::anyhow!("Gateway: catalog required"))?,
+                    .ok_or_else(|| anyhow::anyhow!("Gateway: catalog required"))?
+                    .tap(|c| c.attach_metrics(&metrics)),
             ),
             pricing: Arc::new(
                 self.pricing

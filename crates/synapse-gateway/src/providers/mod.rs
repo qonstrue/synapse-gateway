@@ -12,6 +12,7 @@ use crate::providers::genai_provider::{
     VertexProviderConfig,
 };
 use crate::providers::vertex_auth::VertexAuth;
+use crate::telemetry::GatewayMetrics;
 
 /// Built provider clients keyed by provider id.
 #[derive(Debug)]
@@ -106,6 +107,13 @@ pub fn unsatisfiable_providers(
 impl Catalog {
     pub fn get(&self, id: &str) -> Option<&Arc<Provider>> {
         self.providers.get(id)
+    }
+
+    /// Record every provider's retry and breaker metrics on `metrics`.
+    pub fn attach_metrics(&self, metrics: &Arc<GatewayMetrics>) {
+        self.providers
+            .values()
+            .for_each(|p| p.breaker.attach_metrics(metrics.clone()));
     }
 
     /// Build every provider referenced by `referenced`, validating credentials
@@ -362,5 +370,20 @@ mod catalog_tests {
     fn unknown_provider_id_errors() {
         let err = Catalog::build(&env(&[]), &refs(&["bogus"]), Duration::from_secs(5)).unwrap_err();
         assert!(err.to_string().contains("unknown provider id"));
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn attach_metrics_reaches_every_provider_breaker() {
+        let env = HashMap::from([("DASHSCOPE_API_KEY".to_string(), "sk".to_string())]);
+        let referenced = std::collections::HashSet::from(["qwen".to_string()]);
+        let catalog = Catalog::build(&env, &referenced, Duration::from_secs(5)).unwrap();
+        let (m, exporter) = crate::telemetry::test_metrics();
+        catalog.attach_metrics(&m);
+        let breaker = &catalog.get("qwen").unwrap().breaker;
+        (0..5).for_each(|_| breaker.record(&Err::<(), _>("boom")));
+        assert!(crate::telemetry::scrape(&exporter).contains(
+            r#"synapse_resilience_breaker_transitions_total{name="qwen",transition="open"} 1"#
+        ));
     }
 }

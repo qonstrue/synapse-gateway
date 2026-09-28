@@ -546,10 +546,17 @@ async fn buffered_and_streamed_requests_record_on_the_configured_metrics() {
         .build()
         .unwrap();
     let app = router(Arc::new(gateway));
+    let labels = r#"{lane="standard",model="qwen-max",route="fast",system="dashscope"}"#;
 
-    for body in [
-        r#"{"model":"fast","messages":[{"role":"user","content":"hi"}]}"#,
-        r#"{"model":"fast","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+    for (body, requests) in [
+        (
+            r#"{"model":"fast","messages":[{"role":"user","content":"hi"}]}"#,
+            1,
+        ),
+        (
+            r#"{"model":"fast","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+            2,
+        ),
     ] {
         let resp = app
             .clone()
@@ -565,12 +572,16 @@ async fn buffered_and_streamed_requests_record_on_the_configured_metrics() {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         resp.into_body().collect().await.unwrap();
+        let line = format!("synapse_requests_total{labels} {requests}");
+        let text = scrape(&exporter);
+        assert!(
+            text.lines().any(|l| l == line),
+            "missing `{line}` in:\n{text}"
+        );
     }
 
-    let labels = r#"{lane="standard",model="qwen-max",route="fast",system="dashscope"}"#;
     let text = scrape(&exporter);
     for line in [
-        format!("synapse_requests_total{labels} 2"),
         format!("synapse_input_tokens_total{labels} 6"),
         format!("synapse_output_tokens_total{labels} 10"),
         format!("synapse_request_duration_seconds_count{labels} 2"),

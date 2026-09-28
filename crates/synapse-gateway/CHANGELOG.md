@@ -47,9 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- synapse-proxy: OTLP metric export used the async reqwest client on the
-  `PeriodicReader` thread, which has no tokio runtime, so every export panicked.
-  It now uses the blocking client.
+- Grafana dashboard latency panels (`histogram_quantile` over
+  `*_duration_seconds_bucket`) now show data; the previous exporter emitted
+  summaries, so they were empty.
 
 ## [0.5.36] - 2026-09-23
 

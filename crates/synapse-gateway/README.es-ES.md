@@ -300,7 +300,7 @@ Las cuatro métricas `synapse_*` de tokens/peticiones comparten el mismo conjunt
 - **`route`** — el alias de modelo de cara al cliente (p. ej. `gemini-pro`, `fast`).
 - **`model`** — el modelo que realmente atendió la petición (según lo devuelto por el tramo de backend).
 - **`system`** — el valor OpenLLMetry `gen_ai.system`: `vertexai`, `openai`, `dashscope` o `oai_compat`.
-- **`lane`** — `standard` (crate genai) o `native` (REST de Vertex directo).
+- **`lane`** — `standard` (crate genai), `native` (REST de Vertex directo) o `jev` (TypeSafe System One).
 
 El tenant y el workspace **no** son etiquetas de Prometheus. Se registran en el registro de costes (tabla `usage_events`) y se incluyen como atributos en los spans de trazado `gen_ai.*`. Mantenerlos fuera de las etiquetas de métricas evita una cardinalidad no acotada derivada de valores de encabezados suministrados por clientes no confiables.
 

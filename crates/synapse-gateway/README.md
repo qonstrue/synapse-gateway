@@ -445,8 +445,10 @@ most 2000 label combinations; beyond that, new combinations are folded into one
 series labelled `otel_metric_overflow="true"`.
 
 Embedders using `Gateway::builder()` record nothing by default (metrics are a
-no-op); pass `.metrics(Arc<GatewayMetrics>)` to record them, for example from
-`synapse::telemetry::install`.
+no-op); pass `.metrics(Arc<GatewayMetrics>)` to record them. Build it with
+`GatewayMetrics::new(&meter)` from your own `MeterProvider`, or, with the
+`server` feature, from `synapse::telemetry::install`, keeping the returned
+`MetricsExporter` alive for the process lifetime.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|

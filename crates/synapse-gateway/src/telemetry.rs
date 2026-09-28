@@ -294,11 +294,13 @@ mod exporter {
     }
 
     /// A private Prometheus-only exporter for tests.
+    #[doc(hidden)]
     pub fn test_metrics() -> (Arc<GatewayMetrics>, MetricsExporter) {
         install(None, "synapse-gateway-test").expect("prometheus exporter builds")
     }
 
     /// Prometheus text exposition of everything recorded so far.
+    #[doc(hidden)]
     pub fn scrape(exporter: &MetricsExporter) -> String {
         encode(exporter).unwrap_or_default()
     }

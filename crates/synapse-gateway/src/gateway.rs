@@ -877,7 +877,8 @@ impl GatewayBuilder {
         self.ai_task_types = Some(t);
         self
     }
-    /// Where every gateway metric is recorded. Defaults to a no-op.
+    /// Where every gateway metric is recorded. Defaults to a no-op. The guard
+    /// engine always records here, whatever was attached to it before.
     pub fn metrics(mut self, metrics: Arc<GatewayMetrics>) -> Self {
         self.metrics = Some(metrics);
         self

@@ -11,6 +11,7 @@ use crate::resilience::{run_with_classifier, ResilienceError};
 use crate::routing::request::ChatRequest;
 use crate::routing::stream::{Accumulator, FinishReason, StreamItem, ToolCallOut};
 use crate::routing::table::ChainLeg;
+use crate::routing::tool_call_ids::ToolCallIds;
 use futures::stream::{BoxStream, Stream, StreamExt};
 
 /// Normalised result of one completed LLM call.
@@ -205,20 +206,47 @@ fn map_stop_reason(sr: Option<&genai::chat::StopReason>) -> FinishReason {
     }
 }
 
-/// Stateful call_id -> stable 0-based index assignment for tool-call streaming.
-#[derive(Default)]
+/// genai's Gemini adapter drops Gemini's ids and names every call
+/// `call#<fn>#<n>`, restarting `n` each stream chunk, so these ids repeat
+/// within and across responses.
+fn is_genai_synthesized(call_id: &str) -> bool {
+    call_id.starts_with("call#")
+}
+
+/// Stateful call_id -> stable 0-based index assignment for tool-call streaming,
+/// plus the id sent downstream: the upstream id, or this response's minted id
+/// when genai synthesized the upstream one.
 struct ToolIndexer {
     ids: Vec<String>,
+    minted: ToolCallIds,
 }
+
 impl ToolIndexer {
-    /// Returns (index, is_first_time_seen).
-    fn index_of(&mut self, call_id: &str) -> (u32, bool) {
-        if let Some(pos) = self.ids.iter().position(|c| c == call_id) {
-            (pos as u32, false)
-        } else {
-            self.ids.push(call_id.to_string());
-            ((self.ids.len() - 1) as u32, true)
+    fn per_response() -> Self {
+        Self {
+            ids: Vec::new(),
+            minted: ToolCallIds::per_response(),
         }
+    }
+
+    /// Returns the call's index and, the first time the call is seen, its
+    /// downstream id. Every genai-synthesized id starts a new call: Gemini
+    /// sends each call whole in one chunk.
+    fn index_of(&mut self, call_id: &str) -> (u32, Option<String>) {
+        let synthesized = is_genai_synthesized(call_id);
+        if !synthesized {
+            if let Some(pos) = self.ids.iter().position(|c| c == call_id) {
+                return (pos as u32, None);
+            }
+        }
+        let index = self.ids.len() as u32;
+        let id = if synthesized {
+            self.minted.id_for(None, index)
+        } else {
+            call_id.to_string()
+        };
+        self.ids.push(id.clone());
+        (index, Some(id))
     }
 }
 
@@ -251,7 +279,7 @@ pub async fn stream_one_leg_standard(
     }
     let state = St {
         inner: Box::pin(resp.stream),
-        indexer: ToolIndexer::default(),
+        indexer: ToolIndexer::per_response(),
         input_tokens: 0,
         output_tokens: 0,
     };
@@ -269,7 +297,7 @@ pub async fn stream_one_leg_standard(
                     }
                     genai::chat::ChatStreamEvent::ToolCallChunk(tc) => {
                         let call = tc.tool_call;
-                        let (index, first) = st.indexer.index_of(&call.call_id);
+                        let (index, id) = st.indexer.index_of(&call.call_id);
                         let args = match &call.fn_arguments {
                             serde_json::Value::String(s) => s.clone(),
                             other => other.to_string(),
@@ -277,8 +305,8 @@ pub async fn stream_one_leg_standard(
                         return Some((
                             Ok(StreamItem::ToolCallDelta {
                                 index,
-                                id: if first { Some(call.call_id) } else { None },
-                                name: if first { Some(call.fn_name) } else { None },
+                                name: id.as_ref().map(|_| call.fn_name),
+                                id,
                                 args_fragment: args,
                             }),
                             st,
@@ -403,6 +431,110 @@ mod tests {
                 finish_reason: FinishReason::Stop
             }
         ));
+    }
+
+    fn indexer() -> ToolIndexer {
+        ToolIndexer {
+            ids: Vec::new(),
+            minted: crate::routing::tool_call_ids::ToolCallIds::with_prefix("call_t"),
+        }
+    }
+
+    #[test]
+    fn provider_id_passes_through_and_is_stable_across_fragments() {
+        let mut ix = indexer();
+        assert_eq!(ix.index_of("call_abc"), (0, Some("call_abc".to_string())));
+        assert_eq!(ix.index_of("call_abc"), (0, None));
+        assert_eq!(ix.index_of("call_def"), (1, Some("call_def".to_string())));
+    }
+
+    #[test]
+    fn genai_synthesized_ids_become_distinct_calls_with_minted_ids() {
+        let mut ix = indexer();
+        assert_eq!(
+            ix.index_of("call#lookup#0"),
+            (0, Some("call_t_0".to_string()))
+        );
+        assert_eq!(
+            ix.index_of("call#lookup#0"),
+            (1, Some("call_t_1".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_standard_lane_mints_unique_ids_per_response() {
+        use crate::providers::genai_provider::{build_vertex_provider, VertexProviderConfig};
+        use crate::providers::vertex_auth::VertexAuth;
+        use std::time::Duration;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Two chunks, one call each to the same function: genai names both `call#lookup#0`.
+        let sse = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"lookup\",\"args\":{\"q\":\"a\"}}}]}}]}\n\n\
+                   data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"lookup\",\"args\":{\"q\":\"b\"}}}]}}]}\n\n\
+                   data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"role\":\"model\",\"parts\":[]}}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":2}}\n\n";
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/v1/projects/p/locations/global/publishers/google/models/gemini-2.5-flash:streamGenerateContent",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&mock)
+            .await;
+        let auth = Arc::new(VertexAuth::with_fetcher(|| {
+            Box::pin(async { Ok(("t".into(), Duration::from_secs(3600))) })
+        }));
+        let provider = Arc::new(
+            build_vertex_provider(
+                "vertex_global",
+                VertexProviderConfig {
+                    project: "p".into(),
+                    region: "global".into(),
+                    request_timeout: Duration::from_secs(5),
+                    endpoint_override: Some(mock.uri()),
+                },
+                auth,
+            )
+            .unwrap(),
+        );
+        let req = req(serde_json::json!({
+            "model": "gemini-2.5-flash",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        }));
+
+        /// (id, arguments) per call in one response.
+        async fn run(provider: &Arc<Provider>, req: &ChatRequest) -> Vec<(String, String)> {
+            let mut stream =
+                std::pin::pin!(stream_one_leg_standard(provider, "gemini-2.5-flash", req)
+                    .await
+                    .expect("stream starts"));
+            let mut acc = Accumulator::default();
+            while let Some(item) = stream.next().await {
+                acc.push(item.expect("no mid-stream error"));
+            }
+            acc.tool_calls
+                .into_iter()
+                .map(|c| (c.id, c.arguments))
+                .collect()
+        }
+        let first = run(&provider, &req).await;
+        let second = run(&provider, &req).await;
+
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].1, "{\"q\":\"a\"}");
+        assert_eq!(first[1].1, "{\"q\":\"b\"}");
+        assert_ne!(first[0].0, first[1].0);
+        assert!(first
+            .iter()
+            .all(|(id, _)| id.starts_with("call_") && !id.contains('#')));
+        assert!(first
+            .iter()
+            .all(|(id, _)| second.iter().all(|(other, _)| other != id)));
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@ use crate::providers::vertex_auth::VertexAuth;
 use crate::routing::executor::Completion;
 use crate::routing::request::{ChatRequest, VertexExt};
 use crate::routing::stream::{FinishReason, StreamItem};
+use crate::routing::tool_call_ids::ToolCallIds;
 use crate::vertex_endpoint::vertex_endpoint_base;
 
 /// Total-response ceiling for streamed passthrough requests, overriding the
@@ -251,8 +252,8 @@ impl VertexNativeProvider {
         }
 
         // State threaded across byte chunks via `unfold`: SSE line buffer,
-        // a running tool index, a saw_tool flag (to override the finish reason),
-        // and a queue of already-parsed items ready to yield.
+        // a running tool index, this response's tool-call ids, a saw_tool flag
+        // (to override the finish reason), and a queue of already-parsed items.
         struct St<S> {
             inner: S,
             // Raw byte buffer (NOT String): a multi-byte UTF-8 codepoint can be
@@ -261,6 +262,7 @@ impl VertexNativeProvider {
             // whose boundary is always on an ASCII byte.
             buf: Vec<u8>,
             tool_index: u32,
+            ids: ToolCallIds,
             saw_tool: bool,
             pending: std::collections::VecDeque<Result<StreamItem, LegError>>,
         }
@@ -268,6 +270,7 @@ impl VertexNativeProvider {
             inner: Box::pin(resp.bytes_stream()),
             buf: Vec::new(),
             tool_index: 0,
+            ids: ToolCallIds::per_response(),
             saw_tool: false,
             pending: std::collections::VecDeque::new(),
         };
@@ -300,9 +303,11 @@ impl VertexNativeProvider {
                                 }
                                 match serde_json::from_str::<serde_json::Value>(data) {
                                     Ok(json) => {
-                                        for mut item in
-                                            vertex_chunk_to_items(&json, &mut st.tool_index)
-                                        {
+                                        for mut item in vertex_chunk_to_items(
+                                            &json,
+                                            &mut st.tool_index,
+                                            &st.ids,
+                                        ) {
                                             if matches!(item, StreamItem::ToolCallDelta { .. }) {
                                                 st.saw_tool = true;
                                             }
@@ -378,7 +383,11 @@ fn build_payload(req: &ChatRequest, ext: &VertexExt) -> Value {
                         let name = f.get("name")?.as_str()?;
                         let raw = f.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}");
                         let args: Value = serde_json::from_str(raw).unwrap_or_else(|_| json!({}));
-                        Some(json!({ "functionCall": { "name": name, "args": args } }))
+                        let mut call = json!({ "name": name, "args": args });
+                        if let Some(id) = tc.get("id").and_then(Value::as_str) {
+                            call["id"] = json!(id);
+                        }
+                        Some(json!({ "functionCall": call }))
                     })
                     .collect::<Vec<_>>();
                 contents.push(json!({ "role": "model", "parts": parts }));
@@ -390,8 +399,12 @@ fn build_payload(req: &ChatRequest, ext: &VertexExt) -> Value {
                     .as_str()
                     .map(|s| json!({ "content": s }))
                     .unwrap_or_else(|| json!({ "content": m.content.to_string() }));
+                let mut function_response = json!({ "name": name, "response": response });
+                if let Some(id) = &m.tool_call_id {
+                    function_response["id"] = json!(id);
+                }
                 contents.push(json!({ "role": "user", "parts": [
-                    { "functionResponse": { "name": name, "response": response } }
+                    { "functionResponse": function_response }
                 ]}));
             }
             role => {
@@ -511,9 +524,14 @@ fn map_vertex_finish(s: &str) -> FinishReason {
 }
 
 /// Convert one Vertex stream chunk into zero or more `StreamItem`s.
-/// `tool_index` is a running counter the caller threads across the whole stream
-/// so synthesized ids (`call_{n}`) and indices stay stable and unique.
-pub fn vertex_chunk_to_items(chunk: &Value, tool_index: &mut u32) -> Vec<StreamItem> {
+/// `tool_index` is a running counter the caller threads across the whole stream.
+/// `ids` belongs to that stream: a call keeps Gemini's `functionCall.id` when
+/// present, else gets this response's id for its index.
+pub fn vertex_chunk_to_items(
+    chunk: &Value,
+    tool_index: &mut u32,
+    ids: &ToolCallIds,
+) -> Vec<StreamItem> {
     let mut out = Vec::new();
     if let Some(parts) = chunk["candidates"][0]["content"]["parts"].as_array() {
         for p in parts {
@@ -531,7 +549,7 @@ pub fn vertex_chunk_to_items(chunk: &Value, tool_index: &mut u32) -> Vec<StreamI
                 *tool_index += 1;
                 out.push(StreamItem::ToolCallDelta {
                     index: i,
-                    id: Some(format!("call_{i}")),
+                    id: Some(ids.id_for(fc["id"].as_str(), i)),
                     name: Some(name),
                     args_fragment: args.to_string(),
                 });
@@ -621,7 +639,7 @@ mod tests {
                 {"text": "answer"}
             ]}}]
         });
-        let items = vertex_chunk_to_items(&chunk, &mut idx);
+        let items = vertex_chunk_to_items(&chunk, &mut idx, &ToolCallIds::with_prefix("call_t"));
         assert_eq!(items, vec![StreamItem::Delta("answer".into())]);
     }
 
@@ -680,26 +698,57 @@ mod tests {
     }
 
     #[test]
+    fn payload_returns_call_ids_on_function_call_and_response() {
+        let r: ChatRequest = serde_json::from_value(serde_json::json!({
+            "model": "gemini-pro",
+            "messages": [
+                {"role": "user", "content": "weather in SF and NYC?"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "fc-1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"c\":\"SF\"}"}},
+                    {"id": "fc-2", "type": "function", "function": {"name": "get_weather", "arguments": "{\"c\":\"NYC\"}"}},
+                    {"type": "function", "function": {"name": "get_time", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "fc-1", "name": "get_weather", "content": "21C"},
+                {"role": "tool", "tool_call_id": "fc-2", "name": "get_weather", "content": "15C"},
+                {"role": "tool", "name": "get_time", "content": "noon"}
+            ]
+        })).unwrap();
+        let body = build_payload(&r, &VertexExt::default());
+        let contents = body["contents"].as_array().unwrap();
+
+        let calls = &contents[1]["parts"];
+        assert_eq!(calls[0]["functionCall"]["id"], "fc-1");
+        assert_eq!(calls[1]["functionCall"]["id"], "fc-2");
+        assert!(calls[2]["functionCall"].get("id").is_none());
+
+        assert_eq!(contents[2]["parts"][0]["functionResponse"]["id"], "fc-1");
+        assert_eq!(contents[3]["parts"][0]["functionResponse"]["id"], "fc-2");
+        assert!(contents[4]["parts"][0]["functionResponse"]
+            .get("id")
+            .is_none());
+    }
+
+    #[test]
     fn parses_vertex_chunk_text_and_functioncall() {
         use crate::routing::stream::{FinishReason, StreamItem};
         let mut idx = 0u32;
+        let ids = ToolCallIds::with_prefix("call_t");
 
         let text_chunk = serde_json::json!({
             "candidates": [{"content": {"role": "model", "parts": [{"text": "Hi"}]}}]
         });
-        let items = vertex_chunk_to_items(&text_chunk, &mut idx);
+        let items = vertex_chunk_to_items(&text_chunk, &mut idx, &ids);
         assert_eq!(items, vec![StreamItem::Delta("Hi".into())]);
 
         let fc_chunk = serde_json::json!({
             "candidates": [{"content": {"role": "model", "parts": [
                 {"functionCall": {"name": "get_weather", "args": {"c": "SF"}}}]}}]
         });
-        let items = vertex_chunk_to_items(&fc_chunk, &mut idx);
+        let items = vertex_chunk_to_items(&fc_chunk, &mut idx, &ids);
         assert_eq!(
             items,
             vec![StreamItem::ToolCallDelta {
                 index: 0,
-                id: Some("call_0".into()),
+                id: Some("call_t_0".into()),
                 name: Some("get_weather".into()),
                 args_fragment: "{\"c\":\"SF\"}".into(),
             }]
@@ -709,7 +758,7 @@ mod tests {
             "candidates": [{"finishReason": "STOP", "content": {"role": "model", "parts": []}}],
             "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": 3}
         });
-        let items = vertex_chunk_to_items(&final_chunk, &mut idx);
+        let items = vertex_chunk_to_items(&final_chunk, &mut idx, &ids);
         assert_eq!(
             items,
             vec![StreamItem::Done {
@@ -718,6 +767,21 @@ mod tests {
                 finish_reason: FinishReason::Stop
             }]
         );
+    }
+
+    #[test]
+    fn functioncall_keeps_gemini_id() {
+        use crate::routing::stream::StreamItem;
+        let mut idx = 0u32;
+        let chunk = serde_json::json!({
+            "candidates": [{"content": {"role": "model", "parts": [
+                {"functionCall": {"id": "fc-gemini-1", "name": "lookup", "args": {}}}]}}]
+        });
+        let items = vertex_chunk_to_items(&chunk, &mut idx, &ToolCallIds::with_prefix("call_t"));
+        assert!(matches!(
+            &items[0],
+            StreamItem::ToolCallDelta { id: Some(id), .. } if id == "fc-gemini-1"
+        ));
     }
 
     #[test]
@@ -918,6 +982,71 @@ mod tests {
                 finish_reason: FinishReason::ToolCalls
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn stream_ids_are_unique_per_response_and_shared_within_it() {
+        use crate::routing::stream::{Accumulator, StreamItem};
+        use futures::StreamExt;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let sse = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{\"a\":1}}}]}}]}\n\n\
+                   data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{\"a\":2}}}]}}]}\n\n\
+                   data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"role\":\"model\",\"parts\":[]}}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":4}}\n\n";
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/p/locations/global/publishers/google/models/gemini-3-pro:streamGenerateContent"))
+            .respond_with(ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse))
+            .mount(&mock)
+            .await;
+        let auth = Arc::new(VertexAuth::with_fetcher(|| {
+            Box::pin(async { Ok(("test-token".into(), Duration::from_secs(3600))) })
+        }));
+        let provider = VertexNativeProvider::new(
+            auth,
+            "p".into(),
+            "global".into(),
+            Duration::from_secs(5),
+            Some(mock.uri()),
+        );
+        let req: ChatRequest = serde_json::from_value(serde_json::json!({
+            "model":"gemini-3-pro","messages":[{"role":"user","content":"hi"}],"stream":true}))
+        .unwrap();
+
+        /// (streamed ids, buffered ids) for one response.
+        async fn run(
+            provider: &VertexNativeProvider,
+            req: &ChatRequest,
+        ) -> (Vec<String>, Vec<String>) {
+            let mut stream = std::pin::pin!(provider
+                .stream_generate("gemini-3-pro", req, None)
+                .await
+                .expect("starts"));
+            let (mut streamed, mut acc) = (Vec::new(), Accumulator::default());
+            while let Some(item) = stream.next().await {
+                let item = item.unwrap();
+                if let StreamItem::ToolCallDelta { id: Some(id), .. } = &item {
+                    streamed.push(id.clone());
+                }
+                acc.push(item);
+            }
+            let buffered: Vec<String> = acc.tool_calls.into_iter().map(|c| c.id).collect();
+            (streamed, buffered)
+        }
+        let (first, first_buffered) = run(&provider, &req).await;
+        let (second, _) = run(&provider, &req).await;
+
+        assert_eq!(first.len(), 2);
+        assert_ne!(first[0], first[1]);
+        assert_eq!(
+            first[0].trim_end_matches("_0"),
+            first[1].trim_end_matches("_1")
+        );
+        assert_eq!(first, first_buffered);
+        assert!(first.iter().all(|id| !second.contains(id)));
     }
 
     #[tokio::test]

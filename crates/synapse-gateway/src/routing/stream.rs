@@ -71,7 +71,8 @@ impl Accumulator {
     ///
     /// Assumes `ToolCallDelta.index` values are **dense and 0-based** — which both
     /// lanes guarantee by construction (the standard lane assigns indices by
-    /// first-seen call id, the native lane by a running counter). A sparse index
+    /// first-seen call id, except genai-synthesized ids, which take a running
+    /// index; the native lane uses a running counter). A sparse index
     /// would leave empty `ToolCallOut` slots; we never produce one.
     pub fn push(&mut self, item: StreamItem) {
         match item {

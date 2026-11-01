@@ -38,6 +38,14 @@ pub enum GatewayError {
     },
     #[error("guard classifier for policy '{policy}' is unavailable")]
     GuardUnavailable { policy: String },
+    #[error("session belongs to harness '{expected}', cannot switch to '{requested}'")]
+    HarnessMismatch { expected: String, requested: String },
+    #[error("session '{0}' already has an in-flight turn")]
+    SessionBusy(String),
+    #[error("model unavailable: {0}")]
+    ModelUnavailable(String),
+    #[error("harness unavailable: {0}")]
+    HarnessUnavailable(String),
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -61,7 +69,13 @@ impl GatewayError {
             GatewayError::AllCircuitsOpen(_) => StatusCode::SERVICE_UNAVAILABLE,
             GatewayError::UpstreamTimeout => StatusCode::GATEWAY_TIMEOUT,
             GatewayError::ContentBlocked { .. } => StatusCode::BAD_REQUEST,
-            GatewayError::GuardUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            GatewayError::GuardUnavailable { .. } | GatewayError::HarnessUnavailable(_) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            GatewayError::HarnessMismatch { .. } | GatewayError::SessionBusy(_) => {
+                StatusCode::CONFLICT
+            }
+            GatewayError::ModelUnavailable(_) => StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
 
@@ -77,6 +91,10 @@ impl GatewayError {
             GatewayError::Upstream { .. } => "upstream_error",
             GatewayError::ContentBlocked { .. } => "content_blocked",
             GatewayError::GuardUnavailable { .. } => "guard_unavailable",
+            GatewayError::HarnessMismatch { .. } => "harness_mismatch",
+            GatewayError::SessionBusy(_) => "session_busy",
+            GatewayError::ModelUnavailable(_) => "model_unavailable",
+            GatewayError::HarnessUnavailable(_) => "harness_unavailable",
         }
     }
 }
@@ -190,5 +208,37 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["code"], "all_legs_failed");
         assert_eq!(body["error"]["legs_attempted"], 2);
+    }
+
+    #[test]
+    fn uhp_error_variants_map_to_spec_status_codes_and_error_codes() {
+        assert_eq!(
+            GatewayError::HarnessMismatch {
+                expected: "chrn_a".into(),
+                requested: "chrn_b".into()
+            }
+            .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            GatewayError::HarnessMismatch {
+                expected: "chrn_a".into(),
+                requested: "chrn_b".into()
+            }
+            .code(),
+            "harness_mismatch"
+        );
+        assert_eq!(
+            GatewayError::SessionBusy("hsess_1".into()).status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            GatewayError::ModelUnavailable("no compatible cell".into()).status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            GatewayError::HarnessUnavailable("all bases failed".into()).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 }

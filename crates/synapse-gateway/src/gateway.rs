@@ -52,6 +52,9 @@ pub struct Gateway {
     #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) passthrough_models: crate::config::PassthroughModels,
     pub(crate) ai_task_types: Arc<crate::ai_task_type::AiTaskTypeTable>,
+    pub(crate) harnesses: Arc<crate::routing::harness_table::HarnessRouteTable>,
+    pub(crate) uhp_sessions: Arc<crate::harness_planner::UhpSessionStore>,
+    pub(crate) uhp_runner: Option<Arc<dyn crate::harness_planner::UhpRunner>>,
     pub(crate) metrics: Arc<GatewayMetrics>,
 }
 
@@ -181,6 +184,8 @@ pub struct GatewayBuilder {
     guardrails: Option<crate::guard::GuardrailsConfig>,
     passthrough_models: Option<crate::config::PassthroughModels>,
     ai_task_types: Option<crate::ai_task_type::AiTaskTypeTable>,
+    harnesses: Option<crate::routing::harness_table::HarnessRouteTable>,
+    uhp_runner: Option<Arc<dyn crate::harness_planner::UhpRunner>>,
     metrics: Option<Arc<GatewayMetrics>>,
 }
 
@@ -1214,6 +1219,14 @@ impl GatewayBuilder {
         self.ai_task_types = Some(t);
         self
     }
+    pub fn harnesses(mut self, h: crate::routing::harness_table::HarnessRouteTable) -> Self {
+        self.harnesses = Some(h);
+        self
+    }
+    pub fn uhp_runner(mut self, r: Option<Arc<dyn crate::harness_planner::UhpRunner>>) -> Self {
+        self.uhp_runner = r;
+        self
+    }
     /// Where every gateway metric is recorded. Defaults to a no-op. The guard
     /// engine always records here, whatever was attached to it before.
     pub fn metrics(mut self, metrics: Arc<GatewayMetrics>) -> Self {
@@ -1271,6 +1284,9 @@ impl GatewayBuilder {
             guard: Arc::new(guard.with_metrics(metrics.clone())),
             passthrough_models: self.passthrough_models.unwrap_or_default(),
             ai_task_types: Arc::new(self.ai_task_types.unwrap_or_default()),
+            harnesses: Arc::new(self.harnesses.unwrap_or_default()),
+            uhp_sessions: Arc::new(crate::harness_planner::UhpSessionStore::default()),
+            uhp_runner: self.uhp_runner,
             routes: Arc::new(routes),
             metrics,
         })

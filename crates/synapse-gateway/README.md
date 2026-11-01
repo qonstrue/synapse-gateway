@@ -82,7 +82,7 @@ adds streaming, fallback to OpenAI, native Vertex requests and the cost ledger.
 ## Learn more
 
 - [Architecture](https://synapse-gateway.readthedocs.io/en/latest/docs/overview/architecture/): lanes and fallback chains
-- [Routes](https://synapse-gateway.readthedocs.io/en/latest/docs/configuration/routes/) and [environment variables](https://synapse-gateway.readthedocs.io/en/latest/docs/configuration/environment-variables/)
+- [Routes](https://synapse-gateway.readthedocs.io/en/latest/docs/configuration/routes/), [Jev 2D harness router (`config/harnesses.toml`)](https://synapse-gateway.readthedocs.io/en/latest/docs/guides/jev-harness-router/), and [environment variables](https://synapse-gateway.readthedocs.io/en/latest/docs/configuration/environment-variables/)
 - [HTTP API reference](https://synapse-gateway.readthedocs.io/en/latest/docs/reference/http-api/)
 - [Metrics](https://synapse-gateway.readthedocs.io/en/latest/docs/operating/metrics/)
 - [Limitations and roadmap](https://synapse-gateway.readthedocs.io/en/latest/docs/reference/limitations-roadmap/)

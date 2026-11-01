@@ -1,10 +1,10 @@
 //! Reasoning effort a route tier asks of its legs, and how each lane sends it.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Ordered easiest → hardest, so `Ord` compares intensity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
     None,

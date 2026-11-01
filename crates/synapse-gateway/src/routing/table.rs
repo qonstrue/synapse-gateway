@@ -1,7 +1,7 @@
 //! Route table: client-facing model alias → ordered fallback legs.
 
 use anyhow::{anyhow, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tap::Tap;
 
@@ -11,7 +11,7 @@ use crate::routing::jev_router::{order_legs, EffortPolicy};
 /// Jev Score questions accept at most ten levels.
 pub const MAX_TIERS: usize = 10;
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ChainLeg {
     pub provider: String,
     pub model: String,
@@ -19,11 +19,11 @@ pub struct ChainLeg {
     /// the lane falls back to the provider's configured region (env
     /// `VERTEX_LOCATION`). Lets a route pin a model to the region that serves it
     /// (e.g. `global` for Gemini 3 previews) without a process-wide env change.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
     /// Reasoning effort the route planner chose for this leg. Never read from
     /// config: tiers carry effort and the planner stamps it onto their legs.
-    #[serde(skip)]
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
 }
 

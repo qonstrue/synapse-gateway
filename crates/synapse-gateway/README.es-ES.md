@@ -83,7 +83,7 @@ añade streaming, fallback a OpenAI, peticiones Vertex nativas y el registro de 
 ## Más información
 
 - [Arquitectura](https://synapse-gateway.readthedocs.io/en/latest/es/docs/overview/architecture/): carriles y cadenas de fallback
-- [Rutas](https://synapse-gateway.readthedocs.io/en/latest/es/docs/configuration/routes/) y [variables de entorno](https://synapse-gateway.readthedocs.io/en/latest/es/docs/configuration/environment-variables/)
+- [Rutas](https://synapse-gateway.readthedocs.io/en/latest/es/docs/configuration/routes/), [enrutador Jev 2D de arneses (`config/harnesses.toml`)](https://synapse-gateway.readthedocs.io/en/latest/es/docs/guides/jev-harness-router/) y [variables de entorno](https://synapse-gateway.readthedocs.io/en/latest/es/docs/configuration/environment-variables/)
 - [Referencia de la API HTTP](https://synapse-gateway.readthedocs.io/en/latest/es/docs/reference/http-api/)
 - [Métricas](https://synapse-gateway.readthedocs.io/en/latest/es/docs/operating/metrics/)
 - [Limitaciones y hoja de ruta](https://synapse-gateway.readthedocs.io/en/latest/es/docs/reference/limitations-roadmap/)

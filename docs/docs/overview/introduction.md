@@ -84,6 +84,16 @@ Native capabilities:
   on native Vertex legs and reported in `x-synapse-routing` and `x-synapse-tier` response
   headers. See the [Jev router guide](../guides/jev-router.md) and
   [Jev routes](../configuration/routes.md#jev-routes).
+- **Jev 2D harness router (`config/harnesses.toml`)**: routes Universal Harness Protocol
+  (`POST /v1/responses`) turns across a 2D `(harness × model)` grid—selecting both the agent
+  runtime (`pi`, `claude-code`, `codex`, `hermes`, `systemone`) and the model difficulty
+  tier in a single Jev call, pinning the harness base across `previous_response_id`
+  session continuations, and re-scoring model tiers per turn. See the
+  [Jev 2D harness router guide](../guides/jev-harness-router.md).
+- **Native Gemini & Jev passthrough**: forwards `@google/genai` SDK calls
+  (`POST /v1beta/models/{model}:{action}`) and TypeSafe System One calls
+  (`POST /typesafe/v1/systemone`) with Vertex fallback chains, input guardrails and
+  per-tenant cost metering. See the [HTTP API reference](../reference/http-api.md).
 - **Real streaming**: Synapse always streams from upstream, so `stream: true` clients get
   token-by-token server-sent events; non-streaming clients get the buffered result and, on
   the standard lane, keep the full fallback chain. See

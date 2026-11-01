@@ -14,7 +14,7 @@ export default function Home(): ReactNode {
       title={translate({id: 'home.meta.title', message: 'The LLM gateway that keeps native power'})}
       description={translate({
         id: 'home.meta.description',
-        message: 'Synapse is an open-source Rust LLM gateway: OpenAI-compatible on the outside, native Vertex AI and Jev routing on the inside.',
+        message: 'Synapse is an open-source Rust LLM and agent harness gateway: OpenAI, Gemini and Universal Harness Protocol (UHP) on the outside, native Vertex AI, 1D/2D Jev routing and input/output guardrails on the inside.',
       })}>
       <Hero />
       <main>

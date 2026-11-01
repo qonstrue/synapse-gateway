@@ -44,6 +44,33 @@ function features(): Feature[] {
       to: '/docs/guides/jev-router/',
     },
     {
+      title: translate({id: 'home.native.jevharness.title', message: 'Jev 2D harness router'}),
+      description: translate({
+        id: 'home.native.jevharness.description',
+        message:
+          'Route Universal Harness Protocol (POST /v1/responses) turns across a 2D (harness × model) grid—picking both the agent runtime (pi, claude-code, codex, hermes) and the difficulty tier in one Jev call, while pinning the harness base across session continuations.',
+      }),
+      to: '/docs/guides/jev-harness-router/',
+    },
+    {
+      title: translate({id: 'home.native.guardrails.title', message: 'Input, output & Jev guardrails'}),
+      description: translate({
+        id: 'home.native.guardrails.description',
+        message:
+          'Combine fast in-process scanners, in-place [REDACTED:...] masking, TypeSafe Jev semantic noul classifiers and streaming output holdback scanning across chat, passthrough, embeddings and Jev lanes.',
+      }),
+      to: '/docs/configuration/guardrails-policy/',
+    },
+    {
+      title: translate({id: 'home.native.passthrough.title', message: 'Native Gemini & Jev passthrough'}),
+      description: translate({
+        id: 'home.native.passthrough.description',
+        message:
+          'Point @google/genai SDKs or TypeSafe System One clients directly at the gateway. Generation calls walk Vertex fallback legs automatically while keeping guardrails and per-tenant ledger metering.',
+      }),
+      to: '/docs/reference/http-api/',
+    },
+    {
       title: translate({id: 'home.native.streaming.title', message: 'Real streaming, full fallback'}),
       description: translate({
         id: 'home.native.streaming.description',

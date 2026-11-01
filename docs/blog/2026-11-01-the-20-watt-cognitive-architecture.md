@@ -4,7 +4,7 @@ title: "The 20-Watt cognitive architecture: towards AGI with System 1 decision m
 authors: [rajwilkhu]
 tags: [routing, tooling]
 date: 2026-11-01T17:00
-description: Why scaling towards AGI requires reversing today's System-2-only LLM stack—combining sub-100ms System 1 decision models (TypeSafe Jev), reusable agent skills, and gated System 2 escalation to approach the 20-Watt efficiency of biological intelligence.
+description: Why scaling towards AGI requires reversing today's System-2-only LLM stack—combining sub-100ms System 1 decision models (TypeSafe Jev), reusable agent skills, and Synapse's 2D (harness × model) UHP gateway to approach the 20-Watt efficiency of biological intelligence.
 ---
 
 Modern artificial intelligence infrastructure burns kilowatts of power per rack to generate tokens
@@ -118,6 +118,170 @@ routing**, **reusable skills**, and **gated System 2 escalation** in four stages
    solution is captured and packaged into a reusable **skill**. On the next encounter, the agent
    no longer needs to reason from scratch: System 1 recognizes the pattern and dispatches the
    compiled skill directly.
+
+## How the Synapse Harness Gateway powers the 20-Watt AGI loop
+
+In the human brain, the **thalamus and basal ganglia** sit between sensory input and the neocortex:
+they gate incoming signals, select which specialized motor or cognitive circuit to activate, and
+regulate how much metabolic energy is allocated to the task.
+
+In our software stack, Synapse's [2D (`harness × model`) UHP Harness Gateway](/docs/guides/jev-harness-router/)
+serves as that executive thalamus. Clients send agentic tasks to `POST /v1/responses` with
+`"model": "auto"`, and `config/harnesses.toml` maps the cognitive architecture directly onto
+concrete runtimes, skills, and model tiers:
+
+```toml
+[bases.pi]
+label = "Pi Coding Agent"
+wire = ["openai_chat", "gemini_native"]
+skills = true
+environments = true
+mcp_transports = ["stdio", "http", "sse"]
+tool_enforcement = "hard"
+
+[bases.claude-code]
+label = "Claude Code"
+wire = ["openai_chat", "anthropic_messages", "vertex_anthropic"]
+skills = true
+environments = true
+mcp_transports = ["stdio", "http", "sse"]
+tool_enforcement = "hard"
+
+[bases.hermes]
+label = "Hermes Agent"
+wire = ["openai_chat"]
+skills = true
+environments = true
+mcp_transports = ["stdio", "http", "sse"]
+tool_enforcement = "instruction"
+
+[harness_routes."auto"]
+policy = "default"
+strategy = "jev"
+
+[harness_routes."auto".jev_router]
+model = "jev-latest"
+default_profile = "repo_engineering"
+default_tier = "moderate"
+timeout_ms = 400
+min_confidence = 0.5
+min_profile_confidence = 0.5
+reasoning_threshold = 0.7
+horizon_threshold = 0.7
+
+# Axis 1 — Work archetypes (which skill-equipped harness base to engage)
+[harness_routes."auto".profiles.skill_reflex]
+description = "Routine tasks covered by existing skills, quick shell checks, or single-file edits"
+bases = ["pi", "codex"]
+
+[harness_routes."auto".profiles.repo_engineering]
+description = "Multi-file software engineering, refactoring, test execution, and git workflows"
+bases = ["claude-code", "codex", "pi"]
+
+[harness_routes."auto".profiles.deep_research]
+description = "Open-ended research, multi-source synthesis, and long-horizon exploration"
+bases = ["hermes", "claude-code", "pi"]
+
+# Axis 2 — Metabolic budget (model tier, reasoning effort, and step horizon)
+[[harness_routes."auto".tiers]]
+name = "trivial"
+description = "Routine skill execution, status checks, or single-command lookups"
+effort = "none"
+max_step = 5
+timeout_seconds = 60
+legs = [{ route = "lite" }]
+
+[[harness_routes."auto".tiers]]
+name = "moderate"
+description = "Standard feature work, test writing, and multi-file edits"
+effort = "medium"
+max_step = 30
+timeout_seconds = 600
+legs = [{ route = "fast" }, { route = "deep" }]
+
+[[harness_routes."auto".tiers]]
+name = "hard"
+description = "Novel architecture, subtle concurrency bugs, or synthesizing a new skill from scratch"
+effort = "high"
+max_step = 60
+timeout_seconds = 1200
+bases = ["claude-code", "codex"]
+legs = [{ route = "deep" }]
+```
+
+Every turn flowing through the Harness Gateway executes five concrete mechanisms that mirror the
+20-Watt cognitive design:
+
+### 1. Structural capability gating before any model call
+
+Before spending even a single System 1 or System 2 token, `eligible_grid` prunes the `(base × leg)`
+matrix against the request's structural constraints:
+
+- Does the turn attach a workspace (`env_id`) or require **skills** (`skills = true`)?
+- Does it attach MCP servers over `stdio`, `http`, or `sse`?
+- Does the harness configuration enforce hard tool blocks (`disabled_tools` requiring `tool_enforcement = "hard"`)?
+- Do the harness base and upstream model leg share a native wire protocol (`vertex_anthropic`, `gemini_native`, `openai_responses`, `openai_chat`)?
+
+Incompatible cells are eliminated deterministically in microseconds.
+
+### 2. One sub-100ms System 1 call across two orthogonal axes
+
+Next, Synapse sends a bounded UHP state (`latest_user_message`, `recent_history`, `system_prompt`,
+`skill_count`, `mcp_server_count`, `has_environment`, and `is_continuation`) to TypeSafe System One
+(`/v1/systemone`) with up to four typed questions in a single parallel pass:
+
+- **`profile` (`choice`)**: Selects the work archetype (`skill_reflex`, `repo_engineering`, or `deep_research`), choosing which harness runtime owns the tool loop.
+- **`difficulty` (`score`)**: Rates the metabolic budget required (`trivial` → `hard`).
+- **`needs_reasoning` (`noul`)**: Bumps the tier's reasoning `effort` one step (`none` → `minimal` → `low` → `medium` → `high` → `xhigh` → `max`) when step-by-step deduction is required.
+- **`needs_deep_horizon` (`noul`)**: Bumps `max_step` to the next harder tier's step budget when the task requires many iterative tool rounds.
+
+When an incoming UHP request matches an existing **skill** at high confidence, Jev routes it to
+`profile = "skill_reflex"` (`pi`) + `tier = "trivial"` (`gemini-3.5-flash-lite`, `effort = "none"`,
+`max_step = 5`). When the task is novel or ambiguous—for instance, `profile_confidence` drops below
+`min_profile_confidence` or `difficulty` scores in the `hard` band—the gateway gates the request up
+to `claude-code` on the `deep` tier with `effort = "high"` and a 60-step horizon.
+
+### 3. Pinned working memory with elastic per-turn down-shifting
+
+A biological brain does not rebuild its working memory from scratch on every sentence of a
+conversation, yet it immediately relaxes metabolic effort once the hard part of a task is solved.
+
+The Harness Gateway implements this through `previous_response_id` session pinning:
+
+- **Turn 1 (Novel System 2 synthesis)**: An engineer asks the agent to diagnose a distributed lock
+  bug and author a reusable skill for future regressions. Jev selects `repo_engineering` (`claude-code`)
+  + `hard` (`gemini-3.1-pro-preview`, `effort = "high"`, `max_step = 60`). The runner solves the bug
+  and writes the new `SKILL.md` into the workspace.
+- **Turn 2 (Routine follow-up on the same workspace)**: The engineer sends `previous_response_id`
+  with *"Great—commit the new skill and open a PR."* Because `previous_response_id` is present,
+  Synapse **pins `base = "claude-code"`** (preserving the live container, git state, and loaded
+  skills) and omits the `profile` question from Jev, while **re-scoring `difficulty`**. Jev rates
+  Turn 2 as `trivial`, down-shifting the model inside the pinned `claude-code` session to
+  `gemini-3.5-flash-lite` (`effort = "none"`, `max_step = 5`).
+
+### 4. Base-outer, tier-inner resilience
+
+If an upstream model leg experiences a transient `429` or `503` mid-session, switching agent
+harnesses would lose the runner's in-memory context. Synapse's `order_grid` planner therefore walks
+the fallback grid with **harness base as the outer loop** and
+**`escalation_order(tiers.len(), start_tier)` as the inner loop**—escalating to adjacent model
+tiers on the *same* harness base before ever failing over to a secondary base in the profile.
+
+### 5. Flight-recorder telemetry for the skill distillation loop
+
+Every turn emits response headers (`x-synapse-harness-base`, `x-synapse-profile`, `x-synapse-tier`,
+`x-synapse-reasoning-effort`, `x-synapse-max-step`), Prometheus counters
+(`synapse_harness_routing_decisions_total`, `synapse_harness_turns_total`), and paired ledger rows:
+
+- A `route_decision` row (`lane = "jev"`, `tier = "<profile>/<base>/<tier>"`) recording Jev's
+  `score`, `confidence`, and `outcome`.
+- A `harness_turn` row (`lane = "uhp"`) recording the tokens, turns, and USD cost spent by the
+  runner, joined via `thread = session_id` and `message = response_id`.
+
+By querying the ledger for sessions that repeatedly trigger `hard` System 2 tiers on similar task
+types, teams can identify exactly which recurring workflows should be distilled into new **skills**—
+steadily shifting traffic from expensive System 2 deliberation into fast, low-watt System 1 skill
+dispatch.
 
 ## Why this matters for the road to AGI
 

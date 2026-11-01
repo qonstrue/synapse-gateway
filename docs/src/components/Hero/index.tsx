@@ -36,7 +36,7 @@ export default function Hero(): ReactNode {
           </h1>
           <p className={styles.subtitle}>
             <Translate id="home.hero.subtitle">
-              One Rust binary. OpenAI-compatible on the outside, native Vertex AI and Jev routing on the inside. No lowest-common-denominator adapters.
+              One Rust binary. OpenAI, Gemini and Universal Harness Protocol (UHP) on the outside; native Vertex AI, 1D/2D Jev routing and input/output guardrails on the inside. No lowest-common-denominator adapters.
             </Translate>
           </p>
           <div className={styles.buttons}>

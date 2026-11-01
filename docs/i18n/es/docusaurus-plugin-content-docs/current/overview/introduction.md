@@ -92,6 +92,18 @@ Capacidades nativas:
   respuesta `x-synapse-routing` y `x-synapse-tier`. Consulta la
   [guía del router Jev](../guides/jev-router.md) y
   [Rutas Jev](../configuration/routes.md#jev-routes).
+- **Router Jev 2D de arneses (`config/harnesses.toml`)**: enruta turnos del Protocolo
+  Universal de Arneses (`POST /v1/responses`) en una cuadrícula 2D `(arnés × modelo)`
+  —eligiendo tanto el entorno del agente (`pi`, `claude-code`, `codex`, `hermes`,
+  `systemone`) como el nivel de dificultad del modelo en una sola llamada a Jev, fijando la
+  base del arnés en las continuaciones con `previous_response_id` y recalificando el nivel
+  de modelo en cada turno. Consulta la
+  [guía del enrutador Jev 2D de arneses](../guides/jev-harness-router.md).
+- **Passthrough nativo de Gemini y Jev**: reenvía llamadas del SDK `@google/genai`
+  (`POST /v1beta/models/{model}:{action}`) y de TypeSafe System One
+  (`POST /typesafe/v1/systemone`) con cadenas de fallback en Vertex, guardrails de entrada y
+  medición en el registro de costes por tenant. Consulta la
+  [referencia de la API HTTP](../reference/http-api.md).
 - **Streaming real**: Synapse siempre hace streaming desde el proveedor upstream, así que
   los clientes con `stream: true` reciben eventos enviados por el servidor (SSE) token a
   token; los clientes sin streaming reciben el resultado consolidado y, en el carril

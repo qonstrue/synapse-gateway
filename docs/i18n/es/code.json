@@ -3,7 +3,7 @@
     "message": "El gateway de LLM que conserva la potencia nativa"
   },
   "home.meta.description": {
-    "message": "Synapse es un gateway de LLM de código abierto escrito en Rust: compatible con OpenAI por fuera, con Vertex AI nativo y enrutamiento con Jev por dentro."
+    "message": "Synapse es un gateway de LLM y arneses de agentes de código abierto escrito en Rust: OpenAI, Gemini y el Protocolo Universal de Arneses (UHP) por fuera, con Vertex AI nativo, enrutamiento Jev 1D/2D y guardrails de entrada y salida por dentro."
   },
   "home.community.eyebrow": {
     "message": "Código abierto"
@@ -29,20 +29,23 @@
   "home.arch.lane.jev": {
     "message": "Carril Jev"
   },
+  "home.arch.lane.uhp": {
+    "message": "Carril 2D de arneses UHP"
+  },
   "home.arch.eyebrow": {
     "message": "Arquitectura"
   },
   "home.arch.title": {
-    "message": "Tres carriles, una única puerta de entrada compatible con OpenAI"
+    "message": "Cuatro carriles, una puerta de entrada unificada"
   },
   "home.arch.lead": {
-    "message": "Cada petición de chat pasa por los guardrails y, a continuación, la detección de carril elige el carril estándar, el Vertex nativo o el Jev. Cada ruta es una cadena de fallback ordenada, y cada llamada llega al registro de costes y al pipeline de métricas."
+    "message": "Cada petición pasa por guardrails de entrada y salida y, a continuación, se enruta por el carril estándar de OpenAI, el carril Vertex nativo, el carril de decisión Jev o el carril 2D de arneses UHP. Cada ruta es una cadena de fallback ordenada, y cada llamada llega al registro de costes y al pipeline de métricas."
   },
   "home.arch.more": {
     "message": "Lee la guía de arquitectura"
   },
   "home.arch.aria": {
-    "message": "Flujo de peticiones de Synapse a través de tres carriles"
+    "message": "Flujo de peticiones de Synapse a través de cuatro carriles"
   },
   "home.arch.client": {
     "message": "Cliente"
@@ -51,10 +54,10 @@
     "message": "Guardrails"
   },
   "home.arch.detect": {
-    "message": "Detectar carril"
+    "message": "Carril y router Jev"
   },
   "home.arch.bar": {
-    "message": "Cadenas de fallback · Registro de costes · Métricas de OpenTelemetry"
+    "message": "Enrutamiento Jev 1D y 2D · Cadenas de fallback · Guardrails de entrada y salida · Registro de costes · OpenTelemetry"
   },
   "home.family.proxy": {
     "message": "Un sidecar de proxy inverso guiado por configuración: enrutamiento por prefijo de path, inyección de contexto, transformaciones de petición y respuesta, y streaming en modo passthrough."
@@ -72,19 +75,22 @@
     "message": "Más que un gateway"
   },
   "home.compat.openai": {
-    "message": "Los SDK de OpenAI funcionan sin cambios"
+    "message": "Los SDK de OpenAI y @google/genai funcionan sin cambios"
+  },
+  "home.compat.uhp": {
+    "message": "Protocolo Universal de Arneses (POST /v1/responses)"
   },
   "home.compat.fallback": {
-    "message": "Fallback entre OpenAI, Qwen, vLLM, Ollama y TGI"
+    "message": "Fallback entre Vertex AI, OpenAI, Qwen, vLLM, Ollama y TGI"
   },
   "home.compat.ledger": {
-    "message": "Registro de costes por tenant"
+    "message": "Registro de costes por tenant y atribución de tareas de IA"
   },
   "home.compat.otel": {
     "message": "Métricas de OpenTelemetry y un panel de Grafana"
   },
   "home.compat.guardrails": {
-    "message": "Guardrails de entrada"
+    "message": "Guardrails de entrada y salida con clasificadores Jev"
   },
   "home.compat.eyebrow": {
     "message": "Y todo lo que esperas"
@@ -96,7 +102,7 @@
     "message": "la potencia nativa."
   },
   "home.hero.subtitle": {
-    "message": "Un solo binario de Rust. Compatible con OpenAI por fuera, con Vertex AI nativo y enrutamiento con Jev por dentro. Sin adaptadores de mínimo común denominador."
+    "message": "Un solo binario de Rust. OpenAI, Gemini y el Protocolo Universal de Arneses (UHP) por fuera; Vertex AI nativo, enrutamiento Jev 1D/2D y guardrails de entrada y salida por dentro. Sin adaptadores de mínimo común denominador."
   },
   "home.hero.cta.start": {
     "message": "Empezar"
@@ -127,6 +133,24 @@
   },
   "home.native.jevrouter.description": {
     "message": "Jev evalúa la dificultad de cada petición y la sirve con el nivel de modelo y el esfuerzo de razonamiento que le corresponden. El esfuerzo se convierte en el control propio de cada proveedor, como el presupuesto de razonamiento (thinkingBudget) de Vertex, y cada respuesta indica la decisión en los encabezados x-synapse-*."
+  },
+  "home.native.jevharness.title": {
+    "message": "Router Jev 2D de arneses"
+  },
+  "home.native.jevharness.description": {
+    "message": "Enruta turnos del Protocolo Universal de Arneses (POST /v1/responses) en una cuadrícula 2D (arnés × modelo): elige tanto el entorno del agente (pi, claude-code, codex, hermes) como el nivel de dificultad en una sola llamada a Jev, fijando la base del arnés en las continuaciones de sesión."
+  },
+  "home.native.guardrails.title": {
+    "message": "Guardrails de entrada, salida y Jev"
+  },
+  "home.native.guardrails.description": {
+    "message": "Combina escáneres rápidos en proceso, enmascaramiento [REDACTED:...] in situ, clasificadores semánticos noul de TypeSafe Jev y escaneo de salida con retención en streaming en los carriles de chat, passthrough, embeddings y Jev."
+  },
+  "home.native.passthrough.title": {
+    "message": "Passthrough nativo de Gemini y Jev"
+  },
+  "home.native.passthrough.description": {
+    "message": "Apunta los SDK de @google/genai o los clientes de TypeSafe System One directamente al gateway. Las llamadas de generación recorren automáticamente los tramos de fallback de Vertex manteniendo los guardrails y la medición en el registro de costes por tenant."
   },
   "home.native.streaming.title": {
     "message": "Streaming real, fallback completo"

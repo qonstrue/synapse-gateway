@@ -13,6 +13,8 @@ use tap::Tap;
 
 use crate::error::GatewayError;
 use crate::gateway::{Gateway, GuardedStream, RequestCtx};
+use crate::harness_planner::UhpCreateRequest;
+use crate::routing::harness_jev::HarnessRoutingReport;
 use crate::routing::jev_router::RoutingReport;
 use crate::routing::request::ChatRequest;
 use crate::routing::stream::{stream_item_to_sse_json, Accumulator, StreamItem};
@@ -26,7 +28,10 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/v1/models", get(list_models))
+        .route("/v1/harnesses", get(list_harnesses))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(create_uhp_response))
+        .route("/v1/responses/{id}", get(get_uhp_response))
         .route("/v1/embeddings", post(embeddings))
         // Gemini-native passthrough: `@google/generative-ai` / `@google/genai`
         // clients pointed at the gateway via GOOGLE_VERTEX_BASE_URL. The three
@@ -100,6 +105,60 @@ async fn list_models(State(st): State<AppState>) -> impl IntoResponse {
         .map(|id| json!({ "id": id, "object": "model", "owned_by": "synapse" }))
         .collect::<Vec<_>>();
     Json(json!({ "object": "list", "data": data }))
+}
+
+async fn list_harnesses(State(st): State<AppState>) -> impl IntoResponse {
+    let data = st
+        .gateway
+        .harnesses
+        .harnesses()
+        .iter()
+        .map(|(id, cfg)| {
+            json!({
+                "id": id,
+                "object": "harness",
+                "name": cfg.name,
+                "base": cfg.base,
+                "route": cfg.route,
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(json!({ "object": "list", "data": data }))
+}
+
+async fn create_uhp_response(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<UhpCreateRequest>,
+) -> Result<Response, GatewayError> {
+    let (ctx, _request_id) = stamped_ctx(&headers);
+    let (body, routing) = st.gateway.uhp_response(req, &ctx).await?;
+    Ok(with_harness_routing_headers(
+        Json(body).into_response(),
+        &routing,
+    ))
+}
+
+async fn get_uhp_response(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Response, GatewayError> {
+    st.gateway
+        .get_uhp_response(&id)
+        .map(|body| Json(body).into_response())
+        .ok_or(GatewayError::UnknownModel(id))
+}
+
+fn with_harness_routing_headers(response: Response, routing: &HarnessRoutingReport) -> Response {
+    routing
+        .headers()
+        .into_iter()
+        .filter_map(|(name, value)| HeaderValue::from_str(&value).ok().map(|v| (name, v)))
+        .fold(response, |r, (name, v)| {
+            r.tap_mut(|r| {
+                r.headers_mut().insert(name, v);
+            })
+        })
 }
 
 async fn chat_completions(

@@ -151,7 +151,7 @@ fn has_images(req: &ChatRequest) -> bool {
         .is_some_and(|uris| !uris.is_empty())
 }
 
-fn truncate(s: &str, cap: usize) -> String {
+pub(crate) fn truncate(s: &str, cap: usize) -> String {
     s.chars().take(cap).collect()
 }
 

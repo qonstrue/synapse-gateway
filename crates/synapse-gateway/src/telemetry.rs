@@ -52,6 +52,9 @@ pub struct GatewayMetrics {
     guard_classifier_score: Histogram<f64>,
     routing_decisions: Counter<u64>,
     routing_decision_duration: Histogram<f64>,
+    harness_routing_decisions: Counter<u64>,
+    harness_turns: Counter<u64>,
+    harness_turn_duration: Histogram<f64>,
 }
 
 impl Default for GatewayMetrics {
@@ -99,6 +102,14 @@ impl GatewayMetrics {
             routing_decision_duration: seconds_histogram(
                 meter,
                 "synapse_routing_decision_duration_seconds",
+            ),
+            harness_routing_decisions: meter
+                .u64_counter("synapse_harness_routing_decisions_total")
+                .build(),
+            harness_turns: meter.u64_counter("synapse_harness_turns_total").build(),
+            harness_turn_duration: seconds_histogram(
+                meter,
+                "synapse_harness_turn_duration_seconds",
             ),
         }
     }
@@ -275,6 +286,55 @@ impl GatewayMetrics {
         self.routing_decision_duration
             .record(secs, &[KeyValue::new("route", route.to_string())]);
     }
+
+    /// One per turn on a 2D `jev` harness route.
+    pub fn harness_routing_decision(
+        &self,
+        route: &str,
+        profile: &str,
+        base: &str,
+        tier: &str,
+        outcome: &'static str,
+    ) {
+        self.harness_routing_decisions.add(
+            1,
+            &[
+                KeyValue::new("route", route.to_string()),
+                KeyValue::new("profile", profile.to_string()),
+                KeyValue::new("base", base.to_string()),
+                KeyValue::new("tier", tier.to_string()),
+                KeyValue::new("outcome", outcome),
+            ],
+        );
+    }
+
+    /// One completed or failed UHP harness turn.
+    pub fn harness_turn(
+        &self,
+        route: &str,
+        base: &str,
+        model: &str,
+        status: &'static str,
+        secs: f64,
+    ) {
+        self.harness_turns.add(
+            1,
+            &[
+                KeyValue::new("route", route.to_string()),
+                KeyValue::new("base", base.to_string()),
+                KeyValue::new("model", model.to_string()),
+                KeyValue::new("status", status),
+            ],
+        );
+        self.harness_turn_duration.record(
+            secs,
+            &[
+                KeyValue::new("route", route.to_string()),
+                KeyValue::new("base", base.to_string()),
+                KeyValue::new("status", status),
+            ],
+        );
+    }
 }
 
 fn lane_label(lane: &Lane) -> &'static str {
@@ -431,6 +491,33 @@ mod tests {
         m.guard_match("strict", "chat", "input", "ban_substrings", "block");
         m.routing_decision("auto", "hard", "decided");
         m.routing_decision_duration("auto", 0.12);
+        m.harness_routing_decision("auto", "repo_engineering", "claude-code", "hard", "decided");
+        m.harness_turn("auto", "claude-code", "claude-opus-5", "ok", 1.25);
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn harness_routing_and_turn_instruments_export() {
+        let (m, exporter) = test_metrics();
+        m.harness_routing_decision("auto", "repo_engineering", "claude-code", "hard", "decided");
+        m.harness_turn("auto", "claude-code", "claude-opus-5", "ok", 1.25);
+        let text = scrape(&exporter);
+        assert!(
+            text.contains(
+                r#"synapse_harness_routing_decisions_total{base="claude-code",outcome="decided",profile="repo_engineering",route="auto",tier="hard"} 1"#
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                r#"synapse_harness_turns_total{base="claude-code",model="claude-opus-5",route="auto",status="ok"} 1"#
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("synapse_harness_turn_duration_seconds_bucket"),
+            "{text}"
+        );
     }
 
     #[cfg(feature = "server")]

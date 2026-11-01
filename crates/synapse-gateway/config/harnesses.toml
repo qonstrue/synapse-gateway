@@ -1,0 +1,116 @@
+# Harness runtime capability catalog (`[bases.<id>]`), UHP harness seeds
+# (`[harnesses.<id>]`), and 2D (harness × model) routing tables
+# (`[harness_routes.<alias>]`).
+# Spec: docs/superpowers/specs/2026-10-31-jev-2d-harness-router-design.md
+
+[bases.pi]
+label = "Pi Coding Agent"
+wire = ["openai_chat", "gemini_native"]
+skills = true
+environments = true
+mcp_transports = ["stdio", "http", "sse"]
+tool_enforcement = "hard"
+
+[bases.claude-code]
+label = "Claude Code"
+wire = ["openai_chat", "anthropic_messages", "vertex_anthropic"]
+skills = true
+environments = true
+mcp_transports = ["stdio", "http", "sse"]
+tool_enforcement = "hard"
+
+[bases.codex]
+label = "Codex CLI"
+wire = ["openai_chat", "openai_responses"]
+skills = true
+environments = true
+mcp_transports = ["stdio", "http"]
+tool_enforcement = "hard"
+
+[bases.hermes]
+label = "Hermes Agent"
+wire = ["openai_chat"]
+skills = true
+environments = true
+mcp_transports = ["stdio", "http", "sse"]
+tool_enforcement = "instruction"
+
+[bases.systemone]
+label = "TypeSafe System One"
+wire = ["typesafe"]
+skills = false
+environments = false
+mcp_transports = []
+tool_enforcement = "instruction"
+
+# Jev 2D (harness × model) router example (`strategy = "jev"`):
+# In one `/v1/systemone` call, TypeSafe Jev selects both the work archetype
+# (`profiles` -> ordered harness bases) and the difficulty tier (`tiers` ->
+# model legs, reasoning effort, max_step, and timeout_seconds). Continuation
+# turns (`previous_response_id`) keep the session's `base` pinned while
+# re-scoring difficulty so follow-ups can down-shift to cheaper/faster tiers.
+#
+# [harnesses."chrn_default"]
+# name = "default-agent"
+# base = "auto"
+# route = "auto"
+# system_prompt = "You are a helpful software engineering agent."
+#
+# [harness_routes."auto"]
+# policy = "default"
+# strategy = "jev"
+#
+# [harness_routes."auto".jev_router]
+# model = "jev-latest"
+# default_profile = "repo_engineering"
+# default_tier = "moderate"
+# timeout_ms = 400
+# min_confidence = 0.5
+# min_profile_confidence = 0.5
+# reasoning_threshold = 0.7
+# horizon_threshold = 0.7
+#
+# [harness_routes."auto".profiles.quick_script]
+# description = "Fast shell commands, file inspection, one-file edits, or quick lookups"
+# bases = ["pi", "codex"]
+#
+# [harness_routes."auto".profiles.repo_engineering]
+# description = "Multi-file software engineering, refactoring, test execution, and git workflows"
+# bases = ["claude-code", "codex", "pi"]
+#
+# [harness_routes."auto".profiles.deep_research]
+# description = "Open-ended research, multi-source synthesis, and long-horizon exploration"
+# bases = ["hermes", "claude-code", "pi"]
+#
+# [[harness_routes."auto".tiers]]
+# name = "trivial"
+# description = "Greetings, status checks, or single-command file reads"
+# effort = "none"
+# max_step = 5
+# timeout_seconds = 60
+# legs = [{ route = "lite" }]
+#
+# [[harness_routes."auto".tiers]]
+# name = "easy"
+# description = "Small single-file edits, simple scripts, or straightforward explanations"
+# effort = "low"
+# max_step = 15
+# timeout_seconds = 180
+# legs = [{ route = "fast" }]
+#
+# [[harness_routes."auto".tiers]]
+# name = "moderate"
+# description = "Multi-file feature work, test writing, and standard debugging"
+# effort = "medium"
+# max_step = 30
+# timeout_seconds = 600
+# legs = [{ route = "fast" }, { route = "deep" }]
+#
+# [[harness_routes."auto".tiers]]
+# name = "hard"
+# description = "Complex architecture, subtle concurrency bugs, or large cross-cutting refactors"
+# effort = "high"
+# max_step = 60
+# timeout_seconds = 1200
+# bases = ["claude-code", "codex"]
+# legs = [{ route = "deep" }]
